@@ -85,10 +85,15 @@ namespace EndlessHorizon
         private HorizonLighting lighting;
         public MountainMask Mountains;
         private readonly List<(CellRect rect, Mesh mesh)> lightChunks = new List<(CellRect, Mesh)>();
+        private OutsideGlow outsideGlow;
+        private int glowSignature, nextGlowCheck;
+        private float glowThingDist;
         public HorizonFog Fog;
         public Mesh OpenSky;
         private bool built;
         public bool Built { get; private set; }
+        private readonly List<IOutsideCompatLayer> compatLayers = new List<IOutsideCompatLayer>();
+        internal int CompatSeamRevision;
 
         public long BuildMs;
         public int ChunkCount;
@@ -128,6 +133,18 @@ namespace EndlessHorizon
                 Log.Warning(EndlessHorizonMod.LogPrefix + "Mountain mask failed: " + ex);
             }
 
+            glowThingDist = HorizonFog.CoveredFrom(FogStart, RingWidth, HorizonThings.HiddenAlpha);
+            try
+            {
+                glowSignature = OutsideGlow.Signature(map);
+                outsideGlow = new OutsideGlow(map, Field, Mountains, glowThingDist);
+            }
+            catch (Exception ex)
+            {
+                outsideGlow = null;
+                Log.WarningOnce(EndlessHorizonMod.LogPrefix + "Outside light failed; the ring is lit by the sky only. " + ex, 0x45484C47);
+            }
+            nextGlowCheck = Time.frameCount + 60;
             int size = Section.Size;
             int minX = FloorTo(-RingWidth, size), minZ = FloorTo(-RingWidth, size);
             int maxX = map.Size.x + RingWidth, maxZ = map.Size.z + RingWidth;
@@ -147,7 +164,7 @@ namespace EndlessHorizon
                     terrainChunks.Add(chunk);
                     VertexCount += chunk.VertexCount;
                     HorizonThingsChunk things = HorizonThings.Build(map, rect, Field, FogStart, Mountains, ref PrintedThings, ref FogCells);
-                    Mesh lightMesh = RingLighting.BuildChunk(map, rect, Field, Mountains, FogStart);
+                    Mesh lightMesh = RingLighting.BuildChunk(map, rect, Field, Mountains, FogStart, outsideGlow);
                     if (lightMesh != null)
                     {
                         lightChunks.Add((rect, lightMesh));
@@ -186,6 +203,14 @@ namespace EndlessHorizon
             Fog = new HorizonFog(map, RingWidth, FogStart);
             seasons = new SeasonWatch(map, Field);
             BuildMs = sw.ElapsedMilliseconds;
+            try
+            {
+                compatLayers.AddRange(CompatRegistry.BuildOutside(this));
+            }
+            catch (Exception ex)
+            {
+                Log.WarningOnce(EndlessHorizonMod.LogPrefix + "Building compatibility layers failed. " + ex, 0x45484350);
+            }
             Built = true;
             EdgeRock.RedrawEdgeRock(map);
             HorizonProbe.OnBuilt(this);
@@ -210,6 +235,7 @@ namespace EndlessHorizon
             {
                 return;
             }
+            CompatSeamRevision++;
             Field?.InvalidateOutsideFog();
             CellRect around = CellRect.CenteredOn(loc, 3);
             for (int i = 0; i < dynRects.Count; i++)
@@ -326,6 +352,39 @@ namespace EndlessHorizon
             }
         }
 
+        private void GlowStep()
+        {
+            if (outsideGlow == null || Time.frameCount < nextGlowCheck) return;
+            nextGlowCheck = Time.frameCount + 60;
+            try
+            {
+                int sig = OutsideGlow.Signature(map);
+                if (sig == glowSignature) return;
+                glowSignature = sig;
+                outsideGlow = new OutsideGlow(map, Field, Mountains, glowThingDist, outsideGlow);
+                int w = map.Size.x, h = map.Size.z;
+                for (int i = 0; i < lightChunks.Count; i++)
+                {
+                    CellRect rect = lightChunks[i].rect;
+                    int dx = Math.Max(0, Math.Max(-rect.maxX - 1, rect.minX - w)), dz = Math.Max(0, Math.Max(-rect.maxZ - 1, rect.minZ - h));
+                    if (Math.Max(dx, dz) > 42) continue;
+                    Mesh fresh = RingLighting.BuildChunk(map, rect, Field, Mountains, FogStart, outsideGlow);
+                    int index = i;
+                    pendingSwaps.Add(() =>
+                    {
+                        Mesh old = lightChunks[index].mesh;
+                        lightChunks[index] = (lightChunks[index].rect, fresh ?? old);
+                        if (fresh != null && old != null) Bury(() => UnityEngine.Object.Destroy(old));
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                outsideGlow = null;
+                Log.WarningOnce(EndlessHorizonMod.LogPrefix + "Updating the outside light failed; it stays as it was. " + ex, 0x45484C55);
+            }
+        }
+
         private void RebuildSnow(int i)
         {
             Mesh fresh = EndlessHorizonMod.Settings.snow ? SnowLayer.BuildChunk(map, dynRects[i], Field, Mountains) : null;
@@ -361,7 +420,12 @@ namespace EndlessHorizon
                     calls += c.subMeshes.Count;
                 }
             }
+            for (int i = 0; i < compatLayers.Count; i++)
+            {
+                calls += compatLayers[i].Draw(view);
+            }
             RefreshStep(false);
+            GlowStep();
             CellRect thingView = view.ExpandedBy(3);
             for (int i = 0; i < dynRects.Count; i++)
             {
@@ -432,6 +496,11 @@ namespace EndlessHorizon
                 dispose();
             }
             graveyard.Clear();
+            foreach (IOutsideCompatLayer layer in compatLayers)
+            {
+                layer.Dispose();
+            }
+            compatLayers.Clear();
             if (OpenSky != null)
             {
                 UnityEngine.Object.Destroy(OpenSky);

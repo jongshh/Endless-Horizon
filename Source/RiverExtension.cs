@@ -38,6 +38,7 @@ namespace EndlessHorizon
         private readonly int r, w, h, gw, gh;
         private readonly float[] depth;
         private readonly byte[] owner;
+        private readonly float[] pathS;
         private readonly int bankMax;
         private Perlin shallowizer, bankNoise;
         public readonly List<RiverCrossing> Crossings = new List<RiverCrossing>();
@@ -52,6 +53,7 @@ namespace EndlessHorizon
             gh = h + 2 * r;
             depth = new float[gw * gh];
             owner = new byte[gw * gh];
+            pathS = new float[gw * gh];
             for (int i = 0; i < depth.Length; i++)
             {
                 depth[i] = float.NegativeInfinity;
@@ -287,11 +289,11 @@ namespace EndlessHorizon
                 {
                     width *= Mathf.Clamp01((s - startS) / 10f);
                 }
-                Stamp(p, width / 2f, index);
+                Stamp(p, width / 2f, index, s);
             }
         }
 
-        private void Stamp(Vector2 p, float halfWidth, int index)
+        private void Stamp(Vector2 p, float halfWidth, int index, float s)
         {
             if (halfWidth <= 0.2f)
             {
@@ -315,9 +317,22 @@ namespace EndlessHorizon
                     {
                         depth[i] = inside;
                         owner[i] = (byte)(index + 1);
+                        pathS[i] = Mathf.Max(0f, s);
                     }
                 }
             }
+        }
+
+        public bool TryPathAt(int x, int z, out int crossing, out float s)
+        {
+            crossing = -1;
+            s = 0f;
+            if (!InGrid(x, z)) return false;
+            int i = Index(x, z);
+            if (owner[i] == 0 || float.IsNegativeInfinity(depth[i])) return false;
+            crossing = owner[i] - 1;
+            s = pathS[i];
+            return true;
         }
 
         public TerrainDef TerrainAt(IntVec3 c, TerrainDef baseTerrain, IntVec3 nearestInside)

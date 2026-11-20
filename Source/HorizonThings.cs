@@ -26,6 +26,8 @@ namespace EndlessHorizon
             return layer;
         }
 
+        public static bool IsShownOutside(Thing t) => Eligible(t);
+
         private static bool Eligible(Thing t)
         {
             ThingDef def = t.def;

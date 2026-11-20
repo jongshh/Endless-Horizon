@@ -288,7 +288,7 @@ namespace EndlessHorizon
 
     public static class RingLighting
     {
-        public static Mesh BuildChunk(Map map, CellRect rect, HorizonField field, MountainMask mountains, int fogStart)
+        public static Mesh BuildChunk(Map map, CellRect rect, HorizonField field, MountainMask mountains, int fogStart, OutsideGlow outsideGlow = null)
         {
             int w = map.Size.x, h = map.Size.z;
             float fadeFrom = fogStart - 8f, fadeTo = field.RingWidth - 8f;
@@ -318,6 +318,10 @@ namespace EndlessHorizon
                     blocks = true;
                     roofed = field.OutsideThickRoof(c);
                     return;
+                }
+                if (outsideGlow != null)
+                {
+                    glow = outsideGlow.At(x, z);
                 }
                 index = field.RawSampleAt(c);
                 if (index < 0)

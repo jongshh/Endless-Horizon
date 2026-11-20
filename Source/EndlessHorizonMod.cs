@@ -86,6 +86,7 @@ namespace EndlessHorizon
             Settings.Sanitize();
             var harmony = new Harmony("jongsh.endlesshorizon");
             harmony.PatchAll(typeof(EndlessHorizonMod).Assembly);
+            CompatRegistry.Init(harmony);
             string patched = string.Join(", ", harmony.GetPatchedMethods().Select(m => m.DeclaringType?.Name + "." + m.Name));
             Log.Message($"{LogPrefix}{Version}{(IsDevBuild ? " (development build)" : "")} loaded. Patched: {patched}.{(IsDevBuild ? " Probe mode: " + ProbeMode + "." : "")}");
         }
@@ -139,6 +140,17 @@ namespace EndlessHorizon
             Check("EH_Lighting", ref st.lighting);
             Check("EH_Coast", ref st.useCoastNoise);
             Check("EH_WaterDepth", ref st.drawWaterDepth);
+
+            Header("EH_Section_Compat");
+            foreach (CompatEntry e in CompatRegistry.Entries)
+            {
+                string state = ("EH_Compat_" + e.State).Translate();
+                GUI.color = e.State == CompatState.Detected ? new Color(0.6f, 0.9f, 0.6f)
+                    : e.State == CompatState.NotInstalled ? new Color(0.62f, 0.62f, 0.62f) : new Color(0.95f, 0.75f, 0.45f);
+                list.Label(e.Name + " — " + state, -1f, e.Reason.Length > 0 ? (TipSignal?)e.Reason : null);
+                GUI.color = Color.white;
+            }
+            Note("EH_Compat_Note");
 
             list.Gap(12f);
             if (list.ButtonText("EH_Reset".Translate(), null, 0.3f))
