@@ -18,6 +18,8 @@ namespace EndlessHorizon
         private readonly bool[] fixedOverlit;
         private bool fixedAny;
         public bool Any { get; private set; }
+        public int MapLightCount { get; private set; }
+        public int OutsideLightCount { get; private set; }
 
         private static AccessTools.FieldRef<GlowGrid, HashSet<CompGlower>> litGlowers;
         private static AccessTools.FieldRef<GlowGrid, HashSet<IntVec3>> litTerrain;
@@ -53,6 +55,7 @@ namespace EndlessHorizon
                 var outside = new List<Light>();
                 OutsideLights(outside, maxThingDist);
                 foreach (Light l in outside) Flood(l);
+                OutsideLightCount = outside.Count;
                 fixedSum = sum;
                 fixedOverlit = overlit;
                 fixedAny = Any;
@@ -60,8 +63,10 @@ namespace EndlessHorizon
             sum = new ColorInt[gw * (h + 2 * r)];
             overlit = new bool[sum.Length];
             Any = fixedAny;
+            if (previous != null) OutsideLightCount = previous.OutsideLightCount;
             var lights = new List<Light>();
             MapLights(lights);
+            MapLightCount = lights.Count;
             foreach (Light l in lights) Flood(l);
         }
 

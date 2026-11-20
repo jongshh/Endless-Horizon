@@ -52,6 +52,7 @@ namespace EndlessHorizon
                 (AccessTools.Method(fieldType, "KindAt", two), nameof(KindPrefix)),
                 (AccessTools.Method(fieldType, "Corner", two), nameof(CornerPrefix)),
                 (AccessTools.Method(fieldType, "DeepCorner", two), nameof(DeepCornerPrefix)),
+                (AccessTools.Method(fieldType, "IceCorner", two), nameof(IceCornerPrefix)),
                 (alongCorner, nameof(AlongCornerPrefix)),
                 (AccessTools.Method(fieldType, "AwayFromSea", two), nameof(AwayFromSeaPrefix)),
                 (AccessTools.Method(fieldType, "NotFrozen", two), nameof(NotFrozenPrefix)),
@@ -61,7 +62,7 @@ namespace EndlessHorizon
                 (AccessTools.Method(fieldType, "MarshNear", two), nameof(NearPrefix)),
                 (AccessTools.Method(fieldType, "Distance", new[] { typeof(IntVec3) }), nameof(DistancePrefix)),
                 (AccessTools.Method(fieldType, "Covered", two), nameof(CellFalsePrefix)),
-                (AccessTools.Method(fieldType, "Frozen", two), nameof(CellFalsePrefix)),
+                (AccessTools.Method(fieldType, "Frozen", two), nameof(FrozenPrefix)),
                 (AccessTools.Method(fieldType, "Roofed", two), nameof(RoofedPrefix)),
                 (AccessTools.Method(fieldType, "FlavorAt", two), nameof(FlavorAtPrefix)),
                 (AccessTools.Method(fieldType, "FlavorAround", two), nameof(FlavorAroundPrefix)),
@@ -96,9 +97,10 @@ namespace EndlessHorizon
         {
             public int R, GW, GH, W, H;
             public byte[] Kind;
-            public float[] Signed, Deep, Sea, Along, MarshDist, MarshReach;
+            public float[] Signed, Deep, Sea, Along, MarshDist, MarshReach, Ice;
             public byte[] Flavor, NearFlavor;
             public bool[] Roofed;
+            public bool[] Frozen;
             public bool AnyMarsh;
             public WaterSeam Seam;
             public int[] LakeId, NearLake;
@@ -152,6 +154,13 @@ namespace EndlessHorizon
 
             public float ShoreAt(int x, int z) => CornerOf(Signed, x, z);
             public float DeepAt(int x, int z) => CornerOf(Deep, x, z);
+            public float IceAt(int x, int z) => CornerOf(Ice, x, z);
+            public float NotFrozenAt(int x, int z)
+            {
+                for (int dz = -1; dz <= 0; dz++)
+                    for (int dx = -1; dx <= 0; dx++) if (Frozen[Idx(x + dx, z + dz)]) return 0f;
+                return 1f;
+            }
             public float MarshAt(int x, int z) => CornerOf(MarshDist, x, z);
             public float SeaAt(int x, int z)
             {
@@ -197,6 +206,7 @@ namespace EndlessHorizon
             var soggy = new bool[n];
             o.Flavor = new byte[n];
             o.Roofed = new bool[n];
+            o.Frozen = new bool[n];
             bool any = false;
             for (int z = -r; z < h + r; z++)
             {
@@ -220,6 +230,7 @@ namespace EndlessHorizon
                     soggy[i] = k == 0 && t != null && (t.defName.Contains("Marsh") || t.defName.Contains("Mud"));
                     o.Flavor[i] = k != 0 && k != 4 ? (byte)flavorOf.Invoke(null, new object[] { t }) : (byte)0;
                     o.Roofed[i] = o.InMap(x, z) ? map.roofGrid.RoofAt(c)?.isNatural ?? false : s.Field.OutsideThickRoof(c);
+                    o.Frozen[i] = o.InMap(x, z) ? RimWorld.TerrainDefOf.ThinIce != null && map.terrainGrid.TempTerrainAt(c) == RimWorld.TerrainDefOf.ThinIce : s.Field.FrozenAt(c);
                     if (!o.InMap(x, z) && (k == 1 || k == 2 || k == 3)) any = true;
                 }
             }
@@ -227,10 +238,12 @@ namespace EndlessHorizon
             bool Water(int i) => o.Kind[i] == 1 || o.Kind[i] == 2 || o.Kind[i] == 4;
             o.Signed = Signed(o, i => Water(i));
             o.Deep = Signed(o, i => Water(i) && deep[i]);
+            if (Array.IndexOf(o.Frozen, true) >= 0) o.Ice = Signed(o, i => o.Frozen[i]);
+            else { o.Ice = new float[n]; Array.Fill(o.Ice, -5.5f); }
             o.Sea = CompatSections.Distance(o.GW, o.GH, i => o.Kind[i] == 4, 18f);
             object field = fieldFor.Invoke(null, new object[] { map });
             o.Seam = new WaterSeam(w, h);
-            o.Seam.Capture(field, "Corner", "DeepCorner", "AlongCorner", "AwayFromSea", "NotFrozen", "MarshCorner", "MarshReach",
+            o.Seam.Capture(field, "Corner", "DeepCorner", "IceCorner", "AlongCorner", "AwayFromSea", "NotFrozen", "MarshCorner", "MarshReach",
                 "MovingNear", "StillNear", "OursNear", "MarshNear", "FlavorNear");
             SpreadFlavor(o);
             BuildMarsh(o);
@@ -453,6 +466,22 @@ namespace EndlessHorizon
             return false;
         }
 
+        public static bool IceCornerPrefix(int __0, int __1, ref float __result)
+        {
+            OutsideWater o = Building;
+            if (o == null || (o.OnMap(__0, __1) && !o.Seam.IsEdge(__0, __1))) return true;
+            __result = o.Seam.Connect("IceCorner", __0, __1, o.IceAt);
+            return false;
+        }
+
+        public static bool FrozenPrefix(int __0, int __1, ref bool __result)
+        {
+            OutsideWater o = Building;
+            if (o == null || o.InMap(__0, __1)) return true;
+            __result = o.Frozen[o.Idx(__0, __1)];
+            return false;
+        }
+
         public static bool AwayFromSeaPrefix(int __0, int __1, ref float __result)
         {
             OutsideWater o = Building;
@@ -465,7 +494,7 @@ namespace EndlessHorizon
         {
             OutsideWater o = Building;
             if (o == null || (o.OnMap(__0, __1) && !o.Seam.IsEdge(__0, __1))) return true;
-            __result = Mathf.Clamp01(o.Seam.Connect("NotFrozen", __0, __1, (x, z) => 1f));
+            __result = o.Seam.IsEdge(__0, __1) ? o.Seam.Value("NotFrozen", __0, __1) : o.NotFrozenAt(__0, __1);
             return false;
         }
 

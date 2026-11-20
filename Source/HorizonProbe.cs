@@ -21,14 +21,7 @@ namespace EndlessHorizon
         public static void OnBuilt(HorizonState s)
         {
             Map map = s.map;
-            string mutators = string.Join(",", map.TileInfo?.Mutators?.Select(m => m.defName) ?? Enumerable.Empty<string>());
-            Log.Message($"{EndlessHorizonMod.LogPrefix}{Tag}built map={map.uniqueID} size={map.Size.x}x{map.Size.z} biome={map.Biome?.defName} " +
-                        $"mutators=[{mutators}] ring={s.RingWidth} fogStart={s.FogStart} chunks={s.ChunkCount} verts={s.VertexCount} buildMs={s.BuildMs} " +
-                        $"coast={s.Field.CoastOrigin}/{s.Field.CoastMode} coastCells={s.Field.CoastCells} " +
-                        $"rivers={s.Field.River?.Crossings.Count ?? -1} riverCells={s.Field.RiverCells} meander=x{RiverExtension.MeanderScale:0.##} bank=x{RiverExtension.BankScale:0.##} " +
-                        $"printedThings={s.PrintedThings} fogCells={s.FogCells} rockCells={s.Mountains?.RockCells ?? -1} fogQueue={(HorizonFog.SelfLit ? "selfLit" : "lit")} " +
-                        $"outside={s.Field.OutsideMode} riverPaint=[{s.Field.RiverPaintReport}] fogTint={s.Field.FogTint?.Report ?? "none"} " +
-                        $"rockPrint={RockPrint.Printed}/{RockPrint.Fallbacks} rockNoDef={s.Mountains?.RockCellsWithoutDef ?? -1} weatherReimagined={(Compat_WeatherReimagined.Installed ? (s.OpenSky != null ? "openSky" : "failed") : "absent")}");
+            Log.Message(EndlessHorizonMod.LogPrefix + Tag + HorizonDiagnostics.BuildLine(s));
             GenReconstruction recon = GenReconstruction.For(map);
             Log.Message($"{EndlessHorizonMod.LogPrefix}generator match (6a test): {recon.Report}, {recon.Ms} ms.");
 #if EH_DEV

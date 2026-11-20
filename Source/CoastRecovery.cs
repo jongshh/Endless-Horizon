@@ -228,5 +228,7 @@ namespace EndlessHorizon
             t = t * t * (3f - 2f * t);
             return Mathf.Lerp(mirror, fit, t);
         }
+
+        public bool PredictedSea(IntVec3 c) => noise.GetValue(c.x, 0, c.z) < 0.5;
     }
 }

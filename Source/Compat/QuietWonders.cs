@@ -259,7 +259,7 @@ namespace EndlessHorizon
         private static TerrainDef TerrainOut(Ctx k, IntVec3 c)
         {
             HorizonField f = k.S.Field;
-            TerrainDef t = f.At(c);
+            TerrainDef t = f.TopAt(c);
             if (t != null) return t;
             var edge = new IntVec3(Mathf.Clamp(c.x, 0, k.W - 1), 0, Mathf.Clamp(c.z, 0, k.H - 1));
             return k.Map.terrainGrid.BaseTerrainAt(edge) ?? TerrainDefOf.Soil;

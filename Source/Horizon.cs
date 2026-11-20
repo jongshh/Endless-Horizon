@@ -71,6 +71,7 @@ namespace EndlessHorizon
         private readonly List<HorizonChunk> terrainChunks = new List<HorizonChunk>();
         private readonly List<HorizonChunk> depthChunks = new List<HorizonChunk>();
         private readonly List<CellRect> dynRects = new List<CellRect>();
+        private readonly Dictionary<(int x, int z), int> chunkByCorner = new Dictionary<(int, int), int>();
         private readonly List<HorizonThingsChunk> dynThings = new List<HorizonThingsChunk>();
         private readonly List<Mesh> dynSnow = new List<Mesh>();
         private readonly Queue<int> refreshQueue = new Queue<int>();
@@ -86,6 +87,7 @@ namespace EndlessHorizon
         public MountainMask Mountains;
         private readonly List<(CellRect rect, Mesh mesh)> lightChunks = new List<(CellRect, Mesh)>();
         private OutsideGlow outsideGlow;
+        public OutsideGlow Glow => outsideGlow;
         private int glowSignature, nextGlowCheck;
         private float glowThingDist;
         public HorizonFog Fog;
@@ -132,6 +134,7 @@ namespace EndlessHorizon
                 Mountains = null;
                 Log.Warning(EndlessHorizonMod.LogPrefix + "Mountain mask failed: " + ex);
             }
+            Field.BuildIce();
 
             glowThingDist = HorizonFog.CoveredFrom(FogStart, RingWidth, HorizonThings.HiddenAlpha);
             try
@@ -169,6 +172,7 @@ namespace EndlessHorizon
                     {
                         lightChunks.Add((rect, lightMesh));
                     }
+                    chunkByCorner.Add((rect.minX, rect.minZ), dynRects.Count);
                     dynRects.Add(rect);
                     dynThings.Add(things);
                     dynSnow.Add(EndlessHorizonMod.Settings.snow ? SnowLayer.BuildChunk(map, rect, Field, Mountains) : null);
@@ -236,6 +240,7 @@ namespace EndlessHorizon
                 return;
             }
             CompatSeamRevision++;
+            if (Field?.BoundaryBaseChanged(loc) == true) RebuildRequested = true;
             Field?.InvalidateOutsideFog();
             CellRect around = CellRect.CenteredOn(loc, 3);
             for (int i = 0; i < dynRects.Count; i++)
@@ -299,7 +304,24 @@ namespace EndlessHorizon
             SwapAndCollect();
             if (seasons != null)
             {
-                seasons.Check(force, out bool snowChanged, out bool thingsChanged);
+                seasons.Check(force, out bool snowChanged, out bool thingsChanged, out bool iceChanged);
+                if (iceChanged && Field.Ice != null)
+                {
+                    List<IntVec3> changed = Field.Ice.Recalculate();
+                    if (changed.Count > 0)
+                    {
+                        CompatSeamRevision++;
+                        var affected = new HashSet<int>();
+                        foreach (IntVec3 c in changed)
+                            for (int dz = -1; dz <= 1; dz++)
+                                for (int dx = -1; dx <= 1; dx++)
+                                    if (chunkByCorner.TryGetValue((FloorTo(c.x + dx, Section.Size), FloorTo(c.z + dz, Section.Size)), out int i)) affected.Add(i);
+                        foreach (int i in affected)
+                        {
+                            if (seamQueued.Add(i)) seamQueue.Enqueue(i);
+                        }
+                    }
+                }
                 if (thingsChanged && refreshQueue.Count == 0)
                 {
                     RequestRefresh();
@@ -329,7 +351,7 @@ namespace EndlessHorizon
                 terrain.Regenerate();
                 int depthIndex = depthChunks.FindIndex(d => d.Rect == rect);
                 HorizonChunk depth = null;
-                if (depthIndex >= 0)
+                if (EndlessHorizonMod.Settings.drawWaterDepth && (depthIndex >= 0 || Field.AnyWaterIn(rect)))
                 {
                     depth = new HorizonChunk(map, rect, this, true);
                     depth.Regenerate();
@@ -339,15 +361,17 @@ namespace EndlessHorizon
                     HorizonChunk oldTerrain = terrainChunks[i];
                     terrainChunks[i] = terrain;
                     Bury(oldTerrain.Dispose);
-                    if (depth != null)
+                    if (depth != null && depthIndex >= 0)
                     {
                         HorizonChunk oldDepth = depthChunks[depthIndex];
                         depthChunks[depthIndex] = depth;
                         Bury(oldDepth.Dispose);
                     }
+                    else if (depth != null) depthChunks.Add(depth);
                 });
                 int printed = 0, fog = 0;
                 SwapThings(i, HorizonThings.Build(map, rect, Field, FogStart, Mountains, ref printed, ref fog));
+                RebuildSnow(i);
                 SeamRebuilds++;
             }
         }
@@ -681,7 +705,7 @@ namespace EndlessHorizon
                                 t = ct;
                                 CoastCells++;
                             }
-                            else if (edge.IsOcean)
+                            else if (MirroredSea(x, z, edge))
                             {
                                 t = MapGenUtility.BeachTerrainAt(Clamp(c), map) ?? TerrainDefOf.Sand;
                             }
@@ -689,7 +713,8 @@ namespace EndlessHorizon
                         else if (CoastFallback != null)
                         {
                             float dist = Mathf.Max(Mathf.Max(-x, x - map.Size.x + 1), Mathf.Max(-z, z - map.Size.z + 1));
-                            float sea = CoastFallback.SeaScore(c, dist, edge.IsOcean);
+                            bool mirroredSea = MirroredSea(x, z, edge);
+                            float sea = CoastFallback.SeaScore(c, dist, mirroredSea);
                             IntVec3 near = Clamp(c);
                             if (sea > 0.1f) t = MapGenUtility.DeepOceanWaterTerrainAt(near, map);
                             else if (sea > 0f) t = MapGenUtility.ShallowOceanWaterTerrainAt(near, map);
@@ -730,6 +755,16 @@ namespace EndlessHorizon
             {
                 ApplyRiverPaint();
             }
+            ApplyCoastBoundary(coast);
+            CaptureBaseBoundary();
+        }
+
+        private bool MirroredSea(int x, int z, TerrainDef edge)
+        {
+            int w = map.Size.x, h = map.Size.z;
+            float dist = Mathf.Max(Mathf.Max(-x, x - w + 1), Mathf.Max(-z, z - h + 1));
+            if (dist >= 14f) return edge.IsOcean;
+            return map.terrainGrid.BaseTerrainAt(new IntVec3(Mirror(x, w), 0, Mirror(z, h)))?.IsOcean ?? false;
         }
 
         private TerrainDef ThresholdTerrain(CoastNoise.Source coast, IntVec3 c)
@@ -1060,7 +1095,7 @@ namespace EndlessHorizon
                 }
                 return ct;
             }
-            return new CellTerrain(state.Field.At(c), false, 0f, 0f, null);
+            return new CellTerrain(state.Field.TopAt(c), false, 0f, 0f, null);
         }
 
         private Material MaterialFor(CellTerrain ct)

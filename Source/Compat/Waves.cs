@@ -74,6 +74,7 @@ namespace EndlessHorizon
             public byte[] Kind;
             public float[] Signed, Calm, Reach, Clearance;
             public bool[] Rock;
+            public bool[] Frozen;
             public WaterSeam Seam;
 
             public bool InMap(int x, int z) => x >= 0 && z >= 0 && x < W && z < H;
@@ -97,6 +98,12 @@ namespace EndlessHorizon
             public float WaveDistance(int x, int z) => WaterFieldMath.WaveDistance(Corner(x, z), Calm[Idx(x, z)]);
             public float ReachAt(int x, int z) => Reach[Idx(x, z)];
             public float ClearanceAt(int x, int z) => Clearance[Idx(x, z)];
+            public float NotFrozenAt(int x, int z)
+            {
+                for (int dz = -1; dz <= 0; dz++)
+                    for (int dx = -1; dx <= 0; dx++) if (Frozen[Idx(x + dx, z + dz)]) return 0f;
+                return 1f;
+            }
             public float StrengthAt(int x, int z)
             {
                 byte kind = 0;
@@ -114,6 +121,7 @@ namespace EndlessHorizon
             int n = o.GW * o.GH;
             o.Kind = new byte[n];
             o.Rock = new bool[n];
+            o.Frozen = new bool[n];
             var inland = new bool[n];
             var covered = new bool[n];
             bool any = false;
@@ -140,6 +148,7 @@ namespace EndlessHorizon
                         rock = s.Mountains != null && s.Mountains.IsRock(x, z);
                     }
                     o.Rock[i] = rock;
+                    o.Frozen[i] = o.InMap(x, z) ? RimWorld.TerrainDefOf.ThinIce != null && map.terrainGrid.TempTerrainAt(c) == RimWorld.TerrainDefOf.ThinIce : s.Field.FrozenAt(c);
                     bool sea = !rock && t != null && (t.defName == "WaterOceanDeep" || t.defName == "WaterOceanShallow");
                     o.Kind[i] = sea ? (byte)2 : (byte)0;
                     inland[i] = !rock && !sea && t != null && t.IsWater;
@@ -277,7 +286,7 @@ namespace EndlessHorizon
         {
             OutsideShore o = Building;
             if (o == null || (o.OnMap(__0, __1) && !o.Seam.IsEdge(__0, __1))) return true;
-            __result = Mathf.Clamp01(o.Seam.Connect("NotFrozen", __0, __1, (x, z) => 1f));
+            __result = o.Seam.IsEdge(__0, __1) ? o.Seam.Value("NotFrozen", __0, __1) : o.NotFrozenAt(__0, __1);
             return false;
         }
 

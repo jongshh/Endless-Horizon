@@ -67,7 +67,7 @@ namespace EndlessHorizon
 
     public class EndlessHorizonMod : Mod
     {
-        public const string Version = "1.0.0.2";
+        public const string Version = "1.0.0.3";
         public const string LogPrefix = "[Endless Horizon] ";
 
         public static HorizonSettings Settings;
@@ -86,6 +86,7 @@ namespace EndlessHorizon
             Settings.Sanitize();
             var harmony = new Harmony("jongsh.endlesshorizon");
             harmony.PatchAll(typeof(EndlessHorizonMod).Assembly);
+            HorizonDiagnostics.Init(harmony);
             CompatRegistry.Init(harmony);
             string patched = string.Join(", ", harmony.GetPatchedMethods().Select(m => m.DeclaringType?.Name + "." + m.Name));
             Log.Message($"{LogPrefix}{Version}{(IsDevBuild ? " (development build)" : "")} loaded. Patched: {patched}.{(IsDevBuild ? " Probe mode: " + ProbeMode + "." : "")}");
@@ -96,8 +97,10 @@ namespace EndlessHorizon
         public override void DoSettingsWindowContents(Rect inRect)
         {
             HorizonSettings st = Settings;
+            var viewRect = new Rect(0f, 0f, inRect.width - 16f, Mathf.Max(settingsHeight, inRect.height));
+            Widgets.BeginScrollView(inRect, ref settingsScroll, viewRect);
             var list = new Listing_Standard();
-            list.Begin(inRect);
+            list.Begin(viewRect);
 
             void Header(string key)
             {
@@ -153,17 +156,39 @@ namespace EndlessHorizon
             Note("EH_Compat_Note");
 
             list.Gap(12f);
-            if (list.ButtonText("EH_Reset".Translate(), null, 0.3f))
+            Rect row = list.GetRect(30f);
+            if (Widgets.ButtonText(new Rect(row.x, row.y, row.width * 0.3f, row.height), "EH_Reset".Translate()))
             {
                 st.ResetToDefaults();
             }
+            if (Widgets.ButtonText(new Rect(row.x + row.width * 0.32f, row.y, row.width * 0.3f, row.height), "EH_Diagnostics_Copy".Translate()))
+            {
+                string report;
+                try
+                {
+                    report = HorizonDiagnostics.Collect();
+                }
+                catch (Exception ex)
+                {
+                    report = "Endless Horizon diagnostics failed: " + ex;
+                }
+                GUIUtility.systemCopyBuffer = report;
+                Messages.Message("EH_Diagnostics_Copied".Translate(), RimWorld.MessageTypeDefOf.NeutralEvent, false);
+            }
+            list.Gap(4f);
+            Note("EH_Diagnostics_Note");
             Note("EH_ApplyNote");
             if (IsDevBuild)
             {
                 Note("EH_DevNote");
             }
+            settingsHeight = list.CurHeight + 12f;
             list.End();
+            Widgets.EndScrollView();
         }
+
+        private static Vector2 settingsScroll;
+        private static float settingsHeight = 1200f;
 
         public override void WriteSettings()
         {

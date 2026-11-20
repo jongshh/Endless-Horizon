@@ -21,13 +21,57 @@ namespace EndlessHorizon
             {
                 c = new IntVec3(Mathf.Clamp(x, -field.RingWidth, map.Size.x + field.RingWidth - 1), 0, Mathf.Clamp(z, -field.RingWidth, map.Size.z + field.RingWidth - 1));
             }
-            TerrainDef t = field.At(c);
+            TerrainDef t = field.TopAt(c);
             if (t == null || t.IsWater || (mountains != null && mountains.IsRock(c.x, c.z)))
             {
                 return 0f;
             }
             int s = field.RawSampleAt(c);
+            if (field.FrozenAt(c))
+            {
+                IntVec3 src = s < 0 ? IntVec3.Invalid : map.cellIndices.IndexToCell(s);
+                if (src.IsValid && RimWorld.TerrainDefOf.ThinIce != null && map.terrainGrid.TempTerrainAt(src) == RimWorld.TerrainDefOf.ThinIce)
+                {
+                    return map.snowGrid.GetDepth(src);
+                }
+                return IceSnow(map);
+            }
             return s < 0 ? 0f : map.snowGrid.GetDepth(map.cellIndices.IndexToCell(s));
+        }
+
+        private static Map iceSnowMap;
+        private static int iceSnowFrame = -1;
+        private static float iceSnowDepth;
+
+        private static float IceSnow(Map map)
+        {
+            if (map == iceSnowMap && Time.frameCount == iceSnowFrame) return iceSnowDepth;
+            iceSnowMap = map;
+            iceSnowFrame = Time.frameCount;
+            float ice = 0f, ground = 0f;
+            int iceN = 0, groundN = 0;
+            TerrainDef thin = RimWorld.TerrainDefOf.ThinIce;
+            int w = map.Size.x, h = map.Size.z;
+            for (int z = 1; z < h; z += 3)
+            {
+                for (int x = 1; x < w; x += 3)
+                {
+                    var c = new IntVec3(x, 0, z);
+                    float d = map.snowGrid.GetDepth(c);
+                    if (thin != null && map.terrainGrid.TempTerrainAt(c) == thin)
+                    {
+                        ice += d;
+                        iceN++;
+                    }
+                    else if (iceN == 0 && !map.terrainGrid.TerrainAt(c).IsWater && !c.Roofed(map))
+                    {
+                        ground += d;
+                        groundN++;
+                    }
+                }
+            }
+            iceSnowDepth = iceN > 0 ? ice / iceN : groundN > 0 ? ground / groundN : 0f;
+            return iceSnowDepth;
         }
 
         public static Mesh BuildChunk(Map map, CellRect rect, HorizonField field, MountainMask mountains)
@@ -97,13 +141,15 @@ namespace EndlessHorizon
     {
         private const int CheckInterval = 120;
         private readonly Map map;
+        private readonly HorizonField field;
         private readonly List<int> cells = new List<int>();
         private int nextCheck;
-        private long snowSig, thingSig;
+        private long snowSig, thingSig, iceSig;
 
         public SeasonWatch(Map map, HorizonField field)
         {
             this.map = map;
+            this.field = field;
             var rng = new System.Random(map.Tile.GetHashCode());
             int r = field.RingWidth;
             for (int i = 0; i < 600 && cells.Count < 200; i++)
@@ -121,6 +167,7 @@ namespace EndlessHorizon
                 }
             }
             Compute(out snowSig, out thingSig);
+            iceSig = field.Ice?.Signature() ?? 0;
             nextCheck = Find.TickManager.TicksGame + CheckInterval;
         }
 
@@ -149,9 +196,9 @@ namespace EndlessHorizon
             things = ((long)leafless << 32) | (uint)snowy;
         }
 
-        public void Check(bool force, out bool snowChanged, out bool thingsChanged)
+        public void Check(bool force, out bool snowChanged, out bool thingsChanged, out bool iceChanged)
         {
-            snowChanged = thingsChanged = false;
+            snowChanged = thingsChanged = iceChanged = false;
             int now = Find.TickManager.TicksGame;
             if (!force && now < nextCheck)
             {
@@ -159,6 +206,9 @@ namespace EndlessHorizon
             }
             nextCheck = now + CheckInterval;
             Compute(out long snow, out long things);
+            long ice = field.Ice?.Signature() ?? 0;
+            iceChanged = force || ice != iceSig;
+            iceSig = ice;
             snowChanged = force || snow != snowSig;
             thingsChanged = force || things != thingSig;
             snowSig = snow;
