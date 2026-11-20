@@ -19,8 +19,6 @@ No extra playable cells, no additional pawns, and no massive maps eating away at
 
 Just more world to look at! (And your sieges might look a lot cooler, too.)
 
----
-
 ## What does it do?
 
 - **Extended terrain:** Mountains, forests, rocks, and other natural terrain continue beyond the map.
@@ -30,7 +28,7 @@ Just more world to look at! (And your sieges might look a lot cooler, too.)
 - **Fog and clouds:** The distant landscape gradually disappears into fog instead of ending at another ugly border.
 - **Customizable:** Adjust draw distance, vegetation, fog, clouds, lighting, snow, and water-depth effects to your liking.
 
-> **Note:** Special maps such as underground, space, and pocket maps are excluded.
+Special maps such as underground, space, and pocket maps are excluded.
 
 ## How does it work?
 
@@ -52,15 +50,13 @@ I've tested it with vanilla RimWorld and my 500+ mod setup, and honestly, I coul
 
 Your results may vary depending on your hardware and mod setup, but if you need better FPS, try reducing the draw distance or disabling outside vegetation first.
 
-## Save Compatibility
+## Can I add it to an existing save?
 
-**Can I add it to an existing save?**
+**Yes.**
 
-Yes.
+## Can I remove it from an existing save?
 
-**Can I remove it from an existing save?**
-
-Also yes.
+**Also yes.**
 
 ## Compatibility
 
@@ -71,9 +67,14 @@ Also yes.
 - **Weather Reimagined** — Extends its weather overlay beyond the map.
 - **Smooth Terrain** — Recognizes blended terrain when generating the surroundings.
 - **Realistic Rain** — Puddles and accumulated snow remain inside the playable map.
-- **Combat Extended** — Sire! Some bastard just shouted "CE compatible?" again! He's been dealt with. One plasteel arrow.
+- **RimWorld: Waves** — Extends Waves' ocean rendering beyond the map border, allowing waves to continue seamlessly across the edge.
+- **RimWorld: Living Waters** — Extends rivers, lakes, marshes, cave pools, and springs beyond the map border using Living Waters' visuals.
+- **Quiet Wonders** — Extends cloud shadows, fog banks, rain splashes and ripples, snowflakes, water mist, glow tides, moon paths, marsh wisps, and river flotsam beyond the map border.
+- **Combat Extended** — Sire! Some bastard just shouted "CE compatible?" again!
 
-  **TL;DR:** Yes. It's a graphics mod. Why wouldn't it be? Also tested.
+  He's been dealt with. One, plasteel, arrow.
+
+  TL;DR: Yes. It's a graphics mod. Why wouldn't it be? Also tested.
 
 Other modded terrain and vegetation may also work automatically, depending on how they're implemented.
 
@@ -83,20 +84,17 @@ The original concept, design, and architecture are my own. AI tools were used to
 
 Preview and images are 100% humanslop by me.
 
-## One last thing...
+## Bug Reports & Feedback
 
-Endless Horizon doesn't make your colony bigger.
+**If you encounter a bug or incompatibility, please report it through the [GitHub Issues page](https://github.com/jongshh/Endless-Horizon/issues) or our [Discord server](https://discord.gg/QdjhJpj6T).**
 
-It just makes the world around it feel bigger.
+Please include a diagnostics report when reporting an issue.
 
-**Enjoy!**
+To generate one:
 
----
+1. Load the save where the issue occurs.
+2. Navigate to **Mod Settings → Endless Horizon → Diagnostics**.
+3. The diagnostics report will be automatically copied to your clipboard.
+4. Paste it into your bug report, along with a brief description of the problem and, if possible, a screenshot.
 
-### Bug Reports & Feedback
-
-**If you encounter a bug or incompatibility, please open an issue in this repository with a clear description of the problem and, if possible, an error log or exception stack trace. I'll look into it ASAP!**
-*(Or maybe not. I'm too busy playing RimWorld with this one.)*
-
-
-**Issues that lack sufficient information—such as logs, a list of installed mods, or clear steps to reproduce the problem may be ignored.**
+**Issues not reported through the methods above may not receive quick support.**
