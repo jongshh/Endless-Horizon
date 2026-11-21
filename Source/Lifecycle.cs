@@ -56,7 +56,8 @@ namespace EndlessHorizon
             {
                 return;
             }
-            HorizonRegistry.Peek(map)?.MarkSeamDirty(loc);
+            bool surfaceChanged = (dirtyFlags & ((ulong)MapMeshFlagDefOf.Terrain | (ulong)MapMeshFlagDefOf.Buildings)) != 0;
+            HorizonRegistry.Peek(map)?.MarkSeamDirty(loc, surfaceChanged);
         }
     }
 

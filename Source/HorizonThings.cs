@@ -151,13 +151,48 @@ namespace EndlessHorizon
 
         public static HorizonThingsChunk Build(Map map, CellRect rect, HorizonField field, int fogStart, MountainMask mountains, ref int printed, ref int fogCells)
         {
+            using var work = BeginBuild(map, rect, field, fogStart, mountains);
+            while (work.Steps.MoveNext()) { }
+            printed += work.Printed;
+            fogCells += work.FogCells;
+            return work.Result;
+        }
+
+        public sealed class BuildWork : IDisposable
+        {
+            internal SectionLayer Layer;
+            public int Printed, FogCells;
+            public HorizonThingsChunk Result { get; internal set; }
+            public IEnumerator<bool> Steps { get; internal set; }
+
+            public void Dispose()
+            {
+                Steps?.Dispose();
+                if (Layer == null) return;
+                foreach (LayerSubMesh sm in Layer.subMeshes)
+                    if (sm.mesh != null) UnityEngine.Object.Destroy(sm.mesh);
+                Layer.subMeshes.Clear();
+                Layer = null;
+            }
+        }
+
+        public static BuildWork BeginBuild(Map map, CellRect rect, HorizonField field, int fogStart, MountainMask mountains)
+        {
+            var work = new BuildWork();
+            work.Steps = BuildSteps(map, rect, field, fogStart, mountains, work).GetEnumerator();
+            return work;
+        }
+
+        private static IEnumerable<bool> BuildSteps(Map map, CellRect rect, HorizonField field, int fogStart, MountainMask mountains, BuildWork work)
+        {
             bool printThings = Enabled && EndlessHorizonMod.Settings.things;
-            SectionLayer layer = MakeScratchLayer(map);
+            SectionLayer layer = work.Layer = MakeScratchLayer(map);
             var before = new List<int>();
             float maxDist = HorizonFog.CoveredFrom(fogStart, field.RingWidth, HiddenAlpha);
             bool anyFog = false;
             foreach (IntVec3 c in printThings ? rect.Cells : System.Linq.Enumerable.Empty<IntVec3>())
             {
+                yield return false;
                 if (c.InBounds(map) || !field.Covers(c))
                 {
                     continue;
@@ -172,7 +207,7 @@ namespace EndlessHorizon
                     if (mountains.IsRock(c.x, c.z))
                     {
                         mountains.PrintRock(layer, c);
-                        printed++;
+                        work.Printed++;
                         int rs = field.RawSampleAt(c);
                         if (OutsideFogged(map, field, c))
                         {
@@ -238,7 +273,7 @@ namespace EndlessHorizon
                             verts[v] += delta;
                         }
                     }
-                    printed++;
+                    work.Printed++;
                 }
             }
             if (!anyFog)
@@ -252,11 +287,14 @@ namespace EndlessHorizon
                     }
                 }
             }
+            yield return false;
             if (anyFog)
             {
-                fogCells += AddFog(map, rect, field, layer, fogStart);
+                work.FogCells += AddFog(map, rect, field, layer, fogStart);
             }
+            yield return false;
             AddWeatherMask(map, rect, field, mountains, layer);
+            yield return false;
             if (printThings && mountains != null)
             {
                 int w = map.Size.x, h = map.Size.z;
@@ -271,15 +309,17 @@ namespace EndlessHorizon
             layer.subMeshes.RemoveAll(sm => sm.verts.Count == 0 || sm.tris.Count == 0);
             if (layer.subMeshes.Count == 0)
             {
-                return null;
+                yield break;
             }
             Bounds bounds = rect.ExpandedBy(4).ToBounds();
             foreach (LayerSubMesh sm in layer.subMeshes)
             {
                 sm.FinalizeMesh(MeshParts.All);
                 sm.mesh.bounds = bounds;
+                yield return false;
             }
-            return new HorizonThingsChunk(rect, layer.subMeshes);
+            work.Result = new HorizonThingsChunk(rect, layer.subMeshes);
+            work.Layer = null;
         }
 
         private static int AddFog(Map map, CellRect rect, HorizonField field, SectionLayer layer, int fogStart)

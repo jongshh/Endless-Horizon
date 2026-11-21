@@ -29,11 +29,19 @@ namespace EndlessHorizon
 
         public static HorizonState Get(Map map)
         {
-            if (!states.TryGetValue(map, out HorizonState state) || state.Generation != generation || state.RebuildRequested)
+            if (!states.TryGetValue(map, out HorizonState state) || state.Generation != generation)
             {
                 state?.Dispose();
                 state = new HorizonState(map, generation);
                 states.AddOrUpdate(map, state);
+            }
+            HorizonState ready = state.AdvanceReplacement();
+            if (ready != null)
+            {
+                states.AddOrUpdate(map, ready);
+                ready.retiredWork = state.DisposeSteps().GetEnumerator();
+                EdgeRock.RedrawEdgeRock(map);
+                state = ready;
             }
             return state;
         }
@@ -68,6 +76,65 @@ namespace EndlessHorizon
         public HorizonField Field;
         public CoastNoise.Source CoastSourceOverride;
         public bool RebuildRequested;
+        private HorizonState replacement;
+        internal IEnumerator<bool> retiredWork;
+        internal bool Replacing => replacement != null;
+        private IEnumerator<bool> initialWork;
+        private string buildPhase = "field";
+        private readonly HashSet<IntVec3> replacementEdits = new HashSet<IntVec3>();
+        private float rebuildDue;
+        private int replacementFrame = -1;
+
+        private void RequestFullRebuild(string reason)
+        {
+            RebuildRequested = true;
+            rebuildDue = Time.realtimeSinceStartup + 0.35f;
+            HorizonPerf.Record("ring rebuild requested: " + reason, 0);
+        }
+
+        internal HorizonState AdvanceReplacement()
+        {
+            if (replacementFrame == Time.frameCount) return null;
+            replacementFrame = Time.frameCount;
+            if (replacement == null)
+            {
+                if (!Built || !RebuildRequested || Time.realtimeSinceStartup < rebuildDue) return null;
+                RebuildRequested = false;
+                replacement = new HorizonState(map, Generation) { CoastSourceOverride = CoastSourceOverride };
+                replacement.initialWork = replacement.BuildSteps().GetEnumerator();
+            }
+            var budget = Stopwatch.StartNew();
+            try
+            {
+                do
+                {
+                    long started = Stopwatch.GetTimestamp();
+                    bool more = replacement.initialWork.MoveNext();
+                    double unitMs = (Stopwatch.GetTimestamp() - started) * 1000.0 / Stopwatch.Frequency;
+                    if (unitMs > 0.2) HorizonPerf.Record("ring replacement unit: " + replacement.buildPhase, unitMs);
+                    if (!more)
+                    {
+                        HorizonState ready = replacement;
+                        ready.initialWork.Dispose();
+                        ready.initialWork = null;
+                        ready.RebuildRequested = RebuildRequested;
+                        ready.rebuildDue = rebuildDue;
+                        foreach (IntVec3 loc in replacementEdits) ready.MarkSeamDirty(loc, false);
+                        replacementEdits.Clear();
+                        replacement = null;
+                        return ready;
+                    }
+                } while (budget.Elapsed.TotalMilliseconds < 2.0);
+                return null;
+            }
+            catch
+            {
+                replacement.Dispose();
+                replacement = null;
+                throw;
+            }
+            finally { HorizonPerf.Record("ring replacement (per frame)", budget.Elapsed.TotalMilliseconds); }
+        }
         private readonly List<HorizonChunk> terrainChunks = new List<HorizonChunk>();
         private readonly List<HorizonChunk> depthChunks = new List<HorizonChunk>();
         private readonly List<CellRect> dynRects = new List<CellRect>();
@@ -96,6 +163,20 @@ namespace EndlessHorizon
         public bool Built { get; private set; }
         private readonly List<IOutsideCompatLayer> compatLayers = new List<IOutsideCompatLayer>();
         internal int CompatSeamRevision;
+        private readonly List<IntVec3> compatEvents = new List<IntVec3>();
+        internal int CompatEventFirstSerial { get; private set; }
+        internal int CompatEventSerial => CompatEventFirstSerial + compatEvents.Count;
+        internal IntVec3 CompatEventAt(int serial) => compatEvents[serial - CompatEventFirstSerial];
+
+        private void AddCompatEvent(IntVec3 loc)
+        {
+            compatEvents.Add(loc);
+            if (compatEvents.Count > 1024)
+            {
+                compatEvents.RemoveRange(0, 512);
+                CompatEventFirstSerial += 512;
+            }
+        }
 
         public long BuildMs;
         public int ChunkCount;
@@ -118,11 +199,21 @@ namespace EndlessHorizon
             {
                 return;
             }
+            using var work = BuildSteps().GetEnumerator();
+            while (work.MoveNext()) { }
+            EdgeRock.RedrawEdgeRock(map);
+        }
+
+        private IEnumerable<bool> BuildSteps()
+        {
             built = true;
             RockPrint.Printed = RockPrint.Fallbacks = 0;
             var sw = Stopwatch.StartNew();
             Field = new HorizonField(map, RingWidth);
-            Field.Build(EndlessHorizonMod.Settings.useCoastNoise, CoastSourceOverride);
+            buildPhase = "field";
+            foreach (bool step in Field.BuildSteps(EndlessHorizonMod.Settings.useCoastNoise, CoastSourceOverride)) yield return step;
+            yield return false;
+            buildPhase = "mountains/tint";
             try
             {
                 Mountains = new MountainMask(map, Field);
@@ -134,8 +225,13 @@ namespace EndlessHorizon
                 Mountains = null;
                 Log.Warning(EndlessHorizonMod.LogPrefix + "Mountain mask failed: " + ex);
             }
+            yield return false;
+            buildPhase = "ice";
             Field.BuildIce();
+            seasons = new SeasonWatch(map, Field);
 
+            yield return false;
+            buildPhase = "outside light";
             glowThingDist = HorizonFog.CoveredFrom(FogStart, RingWidth, HorizonThings.HiddenAlpha);
             try
             {
@@ -147,6 +243,7 @@ namespace EndlessHorizon
                 outsideGlow = null;
                 Log.WarningOnce(EndlessHorizonMod.LogPrefix + "Outside light failed; the ring is lit by the sky only. " + ex, 0x45484C47);
             }
+            yield return false;
             nextGlowCheck = Time.frameCount + 60;
             int size = Section.Size;
             int minX = FloorTo(-RingWidth, size), minZ = FloorTo(-RingWidth, size);
@@ -163,31 +260,46 @@ namespace EndlessHorizon
                         continue;
                     }
                     var chunk = new HorizonChunk(map, rect, this, false);
-                    chunk.Regenerate();
+                    buildPhase = "terrain chunk";
                     terrainChunks.Add(chunk);
+                    chunk.Regenerate();
+                    yield return false;
                     VertexCount += chunk.VertexCount;
-                    HorizonThingsChunk things = HorizonThings.Build(map, rect, Field, FogStart, Mountains, ref PrintedThings, ref FogCells);
+                    HorizonThingsChunk things;
+                    buildPhase = "things cell/stage";
+                    using (var work = HorizonThings.BeginBuild(map, rect, Field, FogStart, Mountains))
+                    {
+                        while (work.Steps.MoveNext()) yield return false;
+                        PrintedThings += work.Printed;
+                        FogCells += work.FogCells;
+                        things = work.Result;
+                        dynThings.Add(things);
+                    }
+                    yield return false;
+                    buildPhase = "light chunk";
                     Mesh lightMesh = RingLighting.BuildChunk(map, rect, Field, Mountains, FogStart, outsideGlow);
                     if (lightMesh != null)
                     {
                         lightChunks.Add((rect, lightMesh));
                     }
+                    yield return false;
                     chunkByCorner.Add((rect.minX, rect.minZ), dynRects.Count);
                     dynRects.Add(rect);
-                    dynThings.Add(things);
+                    buildPhase = "snow chunk";
                     dynSnow.Add(EndlessHorizonMod.Settings.snow ? SnowLayer.BuildChunk(map, rect, Field, Mountains) : null);
+                    yield return false;
                     if (things != null)
                     {
                         foreach (LayerSubMesh sm in things.subMeshes) VertexCount += sm.verts.Count;
                     }
                     if (depth && Field.AnyWaterIn(rect))
                     {
+                        buildPhase = "depth chunk";
                         var depthChunk = new HorizonChunk(map, rect, this, true);
+                        depthChunks.Add(depthChunk);
                         depthChunk.Regenerate();
-                        if (depthChunk.HasGeometry)
-                        {
-                            depthChunks.Add(depthChunk);
-                        }
+                        if (!depthChunk.HasGeometry) { depthChunks.Remove(depthChunk); depthChunk.Dispose(); }
+                        yield return false;
                     }
                 }
             }
@@ -203,20 +315,15 @@ namespace EndlessHorizon
                     Log.WarningOnce(EndlessHorizonMod.LogPrefix + "Open-sky mesh for weather overlays failed: " + ex, 0x4548534B);
                 }
             }
+            yield return false;
+            buildPhase = "overlays";
             lighting = new HorizonLighting(map, RingWidth);
             Fog = new HorizonFog(map, RingWidth, FogStart);
-            seasons = new SeasonWatch(map, Field);
+            yield return false;
+            buildPhase = "compat field/strip";
+            foreach (bool step in CompatRegistry.BuildOutsideSteps(this, compatLayers)) yield return step;
             BuildMs = sw.ElapsedMilliseconds;
-            try
-            {
-                compatLayers.AddRange(CompatRegistry.BuildOutside(this));
-            }
-            catch (Exception ex)
-            {
-                Log.WarningOnce(EndlessHorizonMod.LogPrefix + "Building compatibility layers failed. " + ex, 0x45484350);
-            }
             Built = true;
-            EdgeRock.RedrawEdgeRock(map);
             HorizonProbe.OnBuilt(this);
         }
 
@@ -233,23 +340,23 @@ namespace EndlessHorizon
             Refreshes++;
         }
 
-        public void MarkSeamDirty(IntVec3 loc)
+        public void MarkSeamDirty(IntVec3 loc, bool surfaceChanged = true)
         {
             if (!built)
             {
                 return;
             }
-            CompatSeamRevision++;
-            if (Field?.BoundaryBaseChanged(loc) == true) RebuildRequested = true;
+            if (replacement != null) replacementEdits.Add(loc);
+            if (surfaceChanged)
+            {
+                AddCompatEvent(loc);
+                if (replacement != null || Field?.BoundaryBaseChanged(loc) == true) RequestFullRebuild("boundary base terrain");
+            }
             Field?.InvalidateOutsideFog();
             CellRect around = CellRect.CenteredOn(loc, 3);
-            for (int i = 0; i < dynRects.Count; i++)
-            {
-                if (dynRects[i].Overlaps(around) && seamQueued.Add(i))
-                {
-                    seamQueue.Enqueue(i);
-                }
-            }
+            for (int x = FloorTo(around.minX, Section.Size); x <= around.maxX; x += Section.Size)
+                for (int z = FloorTo(around.minZ, Section.Size); z <= around.maxZ; z += Section.Size)
+                    if (chunkByCorner.TryGetValue((x, z), out int i) && seamQueued.Add(i)) seamQueue.Enqueue(i);
         }
 
         private void RequestSnowRefresh()
@@ -289,18 +396,27 @@ namespace EndlessHorizon
             }
         }
 
-        private void SwapThings(int i, HorizonThingsChunk fresh)
-        {
-            pendingSwaps.Add(() =>
-            {
-                HorizonThingsChunk old = dynThings[i];
-                dynThings[i] = fresh;
-                if (old != null) Bury(old.Dispose);
-            });
-        }
-
         private void RefreshStep(bool force)
         {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            try
+            {
+                RefreshStepInner(force);
+            }
+            finally
+            {
+                double ms = sw.Elapsed.TotalMilliseconds;
+                if (ms > 0.2) HorizonPerf.Record("seam/season rebuild (per frame)", ms);
+            }
+        }
+
+        private const double RefreshFrameBudgetMs = 2.0;
+        private IEnumerator<bool> refreshWork;
+        private string refreshPhase = "refresh idle";
+
+        private void RefreshStepInner(bool force)
+        {
+            var budget = Stopwatch.StartNew();
             SwapAndCollect();
             if (seasons != null)
             {
@@ -331,75 +447,159 @@ namespace EndlessHorizon
                     RequestSnowRefresh();
                 }
             }
-            for (int n = 0; n < 4 && refreshQueue.Count > 0; n++)
+            do
             {
-                int i = refreshQueue.Dequeue();
-                int printed = 0, fog = 0;
-                SwapThings(i, HorizonThings.Build(map, dynRects[i], Field, FogStart, Mountains, ref printed, ref fog));
-                RebuildSnow(i);
-            }
-            for (int n = 0; n < 12 && snowQueue.Count > 0; n++)
-            {
-                RebuildSnow(snowQueue.Dequeue());
-            }
-            for (int n = 0; n < 4 && seamQueue.Count > 0; n++)
-            {
-                int i = seamQueue.Dequeue();
-                seamQueued.Remove(i);
-                CellRect rect = dynRects[i];
-                var terrain = new HorizonChunk(map, rect, this, false);
-                terrain.Regenerate();
-                int depthIndex = depthChunks.FindIndex(d => d.Rect == rect);
-                HorizonChunk depth = null;
-                if (EndlessHorizonMod.Settings.drawWaterDepth && (depthIndex >= 0 || Field.AnyWaterIn(rect)))
+                if (refreshWork == null)
                 {
-                    depth = new HorizonChunk(map, rect, this, true);
-                    depth.Regenerate();
+                    if (seamQueue.Count > 0)
+                    {
+                        int i = seamQueue.Dequeue();
+                        seamQueued.Remove(i);
+                        refreshWork = RebuildDynamicChunk(i, true).GetEnumerator();
+                    }
+                    else if (refreshQueue.Count > 0)
+                        refreshWork = RebuildDynamicChunk(refreshQueue.Dequeue(), false).GetEnumerator();
+                    else if (snowQueue.Count > 0)
+                        refreshWork = RebuildSnowStep(snowQueue.Dequeue()).GetEnumerator();
+                    else break;
                 }
+                long unit = Stopwatch.GetTimestamp();
+                bool more;
+                try { more = refreshWork.MoveNext(); }
+                catch
+                {
+                    refreshWork.Dispose();
+                    refreshWork = null;
+                    throw;
+                }
+                finally
+                {
+                    double ms = (Stopwatch.GetTimestamp() - unit) * 1000.0 / Stopwatch.Frequency;
+                    if (ms > 0.2) HorizonPerf.Record(refreshPhase, ms);
+                }
+                if (!more)
+                {
+                    refreshWork.Dispose();
+                    refreshWork = null;
+                }
+            } while (budget.Elapsed.TotalMilliseconds < RefreshFrameBudgetMs);
+        }
+
+        private IEnumerable<bool> RebuildSnowStep(int i)
+        {
+            refreshPhase = "refresh snow unit";
+            RebuildSnow(i);
+            yield break;
+        }
+
+        private IEnumerable<bool> RebuildDynamicChunk(int i, bool seam)
+        {
+            CellRect rect = dynRects[i];
+            HorizonChunk terrain = null, depth = null;
+            HorizonThingsChunk things = null;
+            Mesh snow = null;
+            bool published = false;
+            try
+            {
+                if (seam)
+                {
+                    refreshPhase = "refresh terrain unit";
+                    terrain = new HorizonChunk(map, rect, this, false);
+                    terrain.Regenerate();
+                    yield return false;
+                    refreshPhase = "refresh depth unit";
+                    if (EndlessHorizonMod.Settings.drawWaterDepth && (depthChunks.Exists(d => d.Rect == rect) || Field.AnyWaterIn(rect)))
+                    {
+                        depth = new HorizonChunk(map, rect, this, true);
+                        depth.Regenerate();
+                    }
+                    yield return false;
+                }
+                using (var work = HorizonThings.BeginBuild(map, rect, Field, FogStart, Mountains))
+                {
+                    refreshPhase = "refresh things cell/stage";
+                    while (work.Steps.MoveNext()) yield return false;
+                    things = work.Result;
+                }
+                refreshPhase = "refresh snow unit";
+                snow = EndlessHorizonMod.Settings.snow ? SnowLayer.BuildChunk(map, rect, Field, Mountains) : null;
+                yield return false;
                 pendingSwaps.Add(() =>
                 {
-                    HorizonChunk oldTerrain = terrainChunks[i];
-                    terrainChunks[i] = terrain;
-                    Bury(oldTerrain.Dispose);
-                    if (depth != null && depthIndex >= 0)
+                    if (terrain != null)
                     {
-                        HorizonChunk oldDepth = depthChunks[depthIndex];
-                        depthChunks[depthIndex] = depth;
-                        Bury(oldDepth.Dispose);
+                        HorizonChunk old = terrainChunks[i];
+                        terrainChunks[i] = terrain;
+                        Bury(old.Dispose);
                     }
-                    else if (depth != null) depthChunks.Add(depth);
+                    if (depth != null)
+                    {
+                        int depthIndex = depthChunks.FindIndex(d => d.Rect == rect);
+                        if (depthIndex >= 0)
+                        {
+                            HorizonChunk old = depthChunks[depthIndex];
+                            depthChunks[depthIndex] = depth;
+                            Bury(old.Dispose);
+                        }
+                        else depthChunks.Add(depth);
+                    }
+                    HorizonThingsChunk oldThings = dynThings[i];
+                    dynThings[i] = things;
+                    if (oldThings != null) Bury(oldThings.Dispose);
+                    Mesh oldSnow = dynSnow[i];
+                    dynSnow[i] = snow;
+                    if (oldSnow != null) Bury(() => UnityEngine.Object.Destroy(oldSnow));
                 });
-                int printed = 0, fog = 0;
-                SwapThings(i, HorizonThings.Build(map, rect, Field, FogStart, Mountains, ref printed, ref fog));
-                RebuildSnow(i);
-                SeamRebuilds++;
+                published = true;
+                if (seam) SeamRebuilds++;
+            }
+            finally
+            {
+                if (!published)
+                {
+                    terrain?.Dispose();
+                    depth?.Dispose();
+                    things?.Dispose();
+                    if (snow != null) UnityEngine.Object.Destroy(snow);
+                }
             }
         }
 
+        private readonly Queue<int> glowQueue = new Queue<int>();
+        private readonly HashSet<int> glowQueued = new HashSet<int>();
+        private Color32[] edgeGlowSeen;
+        private const double GlowFrameBudgetMs = 2.0;
+
         private void GlowStep()
         {
-            if (outsideGlow == null || Time.frameCount < nextGlowCheck) return;
-            nextGlowCheck = Time.frameCount + 60;
+            if (outsideGlow == null) return;
+            var sw = System.Diagnostics.Stopwatch.StartNew();
             try
             {
-                int sig = OutsideGlow.Signature(map);
-                if (sig == glowSignature) return;
-                glowSignature = sig;
-                outsideGlow = new OutsideGlow(map, Field, Mountains, glowThingDist, outsideGlow);
-                int w = map.Size.x, h = map.Size.z;
-                for (int i = 0; i < lightChunks.Count; i++)
+                if (Time.frameCount >= nextGlowCheck)
                 {
-                    CellRect rect = lightChunks[i].rect;
-                    int dx = Math.Max(0, Math.Max(-rect.maxX - 1, rect.minX - w)), dz = Math.Max(0, Math.Max(-rect.maxZ - 1, rect.minZ - h));
-                    if (Math.Max(dx, dz) > 42) continue;
-                    Mesh fresh = RingLighting.BuildChunk(map, rect, Field, Mountains, FogStart, outsideGlow);
-                    int index = i;
+                    nextGlowCheck = Time.frameCount + 60;
+                    int sig = OutsideGlow.Signature(map);
+                    if (sig != glowSignature)
+                    {
+                        glowSignature = sig;
+                        OutsideGlow old = outsideGlow;
+                        outsideGlow = new OutsideGlow(map, Field, Mountains, glowThingDist, old);
+                        QueueChangedLight(old, outsideGlow);
+                    }
+                }
+                while (glowQueue.Count > 0)
+                {
+                    int index = glowQueue.Dequeue();
+                    glowQueued.Remove(index);
+                    Mesh fresh = RingLighting.BuildChunk(map, lightChunks[index].rect, Field, Mountains, FogStart, outsideGlow);
                     pendingSwaps.Add(() =>
                     {
                         Mesh old = lightChunks[index].mesh;
                         lightChunks[index] = (lightChunks[index].rect, fresh ?? old);
                         if (fresh != null && old != null) Bury(() => UnityEngine.Object.Destroy(old));
                     });
+                    if (sw.Elapsed.TotalMilliseconds >= GlowFrameBudgetMs) break;
                 }
             }
             catch (Exception ex)
@@ -407,6 +607,47 @@ namespace EndlessHorizon
                 outsideGlow = null;
                 Log.WarningOnce(EndlessHorizonMod.LogPrefix + "Updating the outside light failed; it stays as it was. " + ex, 0x45484C55);
             }
+            finally
+            {
+                double ms = sw.Elapsed.TotalMilliseconds;
+                if (ms > 0.2) HorizonPerf.Record("outside light (per frame)", ms);
+            }
+        }
+
+        private void QueueChangedLight(OutsideGlow before, OutsideGlow after)
+        {
+            int w = map.Size.x, h = map.Size.z;
+            int Perimeter(int x, int z) => z == 0 ? x : z == h - 1 ? w + x : x == 0 ? 2 * w + z : 2 * w + h + z;
+            var now = new Color32[2 * w + 2 * h];
+            for (int x = 0; x < w; x++)
+            {
+                now[Perimeter(x, 0)] = map.glowGrid.VisualGlowAt(map.cellIndices.CellToIndex(x, 0));
+                now[Perimeter(x, h - 1)] = map.glowGrid.VisualGlowAt(map.cellIndices.CellToIndex(x, h - 1));
+            }
+            for (int z = 1; z < h - 1; z++)
+            {
+                now[Perimeter(0, z)] = map.glowGrid.VisualGlowAt(map.cellIndices.CellToIndex(0, z));
+                now[Perimeter(w - 1, z)] = map.glowGrid.VisualGlowAt(map.cellIndices.CellToIndex(w - 1, z));
+            }
+            bool Same(Color32 a, Color32 b) => a.r == b.r && a.g == b.g && a.b == b.b && a.a == b.a;
+            for (int i = 0; i < lightChunks.Count; i++)
+            {
+                CellRect rect = lightChunks[i].rect.ExpandedBy(1);
+                bool changed = edgeGlowSeen == null;
+                foreach (IntVec3 c in rect)
+                {
+                    if (changed) break;
+                    bool inside = c.x >= 0 && c.z >= 0 && c.x < w && c.z < h;
+                    if (!inside) changed = !Same(before.At(c.x, c.z), after.At(c.x, c.z));
+                    else if (c.x == 0 || c.z == 0 || c.x == w - 1 || c.z == h - 1)
+                    {
+                        int k = Perimeter(c.x, c.z);
+                        changed = !Same(edgeGlowSeen[k], now[k]);
+                    }
+                }
+                if (changed && glowQueued.Add(i)) glowQueue.Enqueue(i);
+            }
+            edgeGlowSeen = now;
         }
 
         private void RebuildSnow(int i)
@@ -448,8 +689,21 @@ namespace EndlessHorizon
             {
                 calls += compatLayers[i].Draw(view);
             }
-            RefreshStep(false);
-            GlowStep();
+            if (!Replacing)
+            {
+                RefreshStep(false);
+                GlowStep();
+            }
+            else SwapAndCollect();
+            if (retiredWork != null)
+            {
+                var cleanup = Stopwatch.StartNew();
+                do
+                {
+                    if (!retiredWork.MoveNext()) { retiredWork.Dispose(); retiredWork = null; break; }
+                } while (cleanup.Elapsed.TotalMilliseconds < 1.0);
+                HorizonPerf.Record("ring retirement (per frame)", cleanup.Elapsed.TotalMilliseconds);
+            }
             CellRect thingView = view.ExpandedBy(3);
             for (int i = 0; i < dynRects.Count; i++)
             {
@@ -467,9 +721,10 @@ namespace EndlessHorizon
                     calls += dynThings[i].Draw();
                 }
             }
-            if (Field.PendingCoastSearch != null && Field.PendingCoastSearch.Step(2f))
+            if (!Replacing && Field.PendingCoastSearch != null && Field.PendingCoastSearch.Step(2f))
             {
-                RebuildRequested = true;
+                Field.PendingCoastSearch = null;
+                RequestFullRebuild("coast search completed");
             }
             HorizonSettings s = EndlessHorizonMod.Settings;
             if (s.lighting && !HorizonDebug.HideLighting)
@@ -504,25 +759,45 @@ namespace EndlessHorizon
 
         public void Dispose()
         {
+            foreach (bool step in DisposeSteps()) { }
+        }
+
+        internal IEnumerable<bool> DisposeSteps()
+        {
+            if (retiredWork != null)
+            {
+                while (retiredWork.MoveNext()) yield return false;
+                retiredWork.Dispose();
+                retiredWork = null;
+            }
+            initialWork?.Dispose();
+            initialWork = null;
+            replacement?.Dispose();
+            replacement = null;
+            refreshWork?.Dispose();
+            refreshWork = null;
             bool wasBuilt = Built;
             Built = false;
-            if (wasBuilt && !map.Disposed)
+            if (wasBuilt && !map.Disposed && HorizonRegistry.Peek(map) == this)
             {
                 EdgeRock.RedrawEdgeRock(map);
             }
             foreach (Action swap in pendingSwaps)
             {
                 swap();
+                yield return false;
             }
             pendingSwaps.Clear();
             foreach ((int _, Action dispose) in graveyard)
             {
                 dispose();
+                yield return false;
             }
             graveyard.Clear();
             foreach (IOutsideCompatLayer layer in compatLayers)
             {
                 layer.Dispose();
+                yield return false;
             }
             compatLayers.Clear();
             if (OpenSky != null)
@@ -535,18 +810,22 @@ namespace EndlessHorizon
             foreach (HorizonChunk c in terrainChunks)
             {
                 c.Dispose();
+                yield return false;
             }
             foreach (HorizonChunk c in depthChunks)
             {
                 c.Dispose();
+                yield return false;
             }
             foreach (HorizonThingsChunk c in dynThings)
             {
                 c?.Dispose();
+                yield return false;
             }
             foreach (Mesh m in dynSnow)
             {
                 if (m != null) UnityEngine.Object.Destroy(m);
+                yield return false;
             }
             terrainChunks.Clear();
             depthChunks.Clear();
@@ -559,6 +838,7 @@ namespace EndlessHorizon
             foreach ((CellRect _, Mesh mesh) in lightChunks)
             {
                 UnityEngine.Object.Destroy(mesh);
+                yield return false;
             }
             lightChunks.Clear();
             Fog?.Dispose();
@@ -624,6 +904,11 @@ namespace EndlessHorizon
 
         public void Build(bool useCoast, CoastNoise.Source overrideSource)
         {
+            foreach (bool step in BuildSteps(useCoast, overrideSource)) { }
+        }
+
+        internal IEnumerable<bool> BuildSteps(bool useCoast, CoastNoise.Source overrideSource)
+        {
             CoastNoise.Source coast = null;
             if (useCoast)
             {
@@ -660,12 +945,14 @@ namespace EndlessHorizon
                 River = null;
                 Log.Warning(EndlessHorizonMod.LogPrefix + "River extension failed: " + ex);
             }
+            yield return false;
             ChooseGenerator();
+            yield return false;
             bool workerMode = true;
-            IDisposable scope = coast != null ? new CoastNoise.Scope(coast) : null;
-            try
+            for (int z = -r; z < map.Size.z + r; z++)
             {
-                for (int z = -r; z < map.Size.z + r; z++)
+                IDisposable scope = coast != null ? new CoastNoise.Scope(coast) : null;
+                try
                 {
                     for (int x = -r; x < map.Size.x + r; x++)
                     {
@@ -742,10 +1029,8 @@ namespace EndlessHorizon
                         }
                     }
                 }
-            }
-            finally
-            {
-                scope?.Dispose();
+                finally { scope?.Dispose(); }
+                yield return false;
             }
             if (coast != null && workerMode)
             {
@@ -755,7 +1040,9 @@ namespace EndlessHorizon
             {
                 ApplyRiverPaint();
             }
+            yield return false;
             ApplyCoastBoundary(coast);
+            yield return false;
             CaptureBaseBoundary();
         }
 

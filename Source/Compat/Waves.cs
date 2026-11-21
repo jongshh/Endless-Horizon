@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using HarmonyLib;
 using UnityEngine;
 using Verse;
@@ -10,7 +11,7 @@ namespace EndlessHorizon
     public static class Compat_Waves
     {
         private static Type fieldType, layerType, levelsType, materialsType;
-        private static MethodInfo fieldFor;
+        private static MethodInfo fieldFor, peek, touchedSince;
         private static PropertyInfo glowing;
         private static FieldInfo layerGlow;
         private static PropertyInfo version, localVersion;
@@ -34,6 +35,8 @@ namespace EndlessHorizon
             layerGlow = AccessTools.Field(layerType, "glow");
             version = AccessTools.Property(fieldType, "Version");
             localVersion = AccessTools.Property(fieldType, "LocalVersion");
+            peek = AccessTools.Method(fieldType, "Peek", new[] { typeof(Map) });
+            touchedSince = AccessTools.Method(fieldType, "TouchedSince", new[] { typeof(CellRect), typeof(int) });
             if (fieldFor == null || glowing == null || layerGlow == null || version?.PropertyType != typeof(int)
                 || localVersion?.PropertyType != typeof(int)) return "ShoreField/WaveMaterials members missing";
 
@@ -113,7 +116,7 @@ namespace EndlessHorizon
             }
         }
 
-        private static OutsideShore BuildShore(HorizonState s)
+        private static IEnumerable<bool> BuildShoreSteps(HorizonState s, StripBuild<OutsideShore>.Holder result)
         {
             Map map = s.map;
             int w = map.Size.x, h = map.Size.z, r = s.RingWidth + Section.Size + 24;
@@ -154,10 +157,13 @@ namespace EndlessHorizon
                     inland[i] = !rock && !sea && t != null && t.IsWater;
                     if (sea && !o.InMap(x, z)) any = true;
                 }
+                if (((z + r) & 31) == 31) yield return false;
             }
-            if (!any) return null;
+            if (!any) yield break;
             BuildReach(o, inland);
+            yield return false;
             CalmPockets(o);
+            yield return false;
             float[] toLand = CompatSections.Distance(o.GW, o.GH, i => o.Kind[i] == 0, 64f);
             float[] toSea = CompatSections.Distance(o.GW, o.GH, i => o.Kind[i] != 0, 8f);
             o.Signed = new float[n];
@@ -165,16 +171,21 @@ namespace EndlessHorizon
             {
                 o.Signed[i] = o.Kind[i] != 0 ? toLand[i] - 0.5f : 0.5f - toSea[i];
             }
+            yield return false;
             WaterFieldMath.Blur(o.Signed, o.GW, o.GH);
             WaterFieldMath.Blur(o.Signed, o.GW, o.GH);
+            yield return false;
             o.Calm = (float[])o.Signed.Clone();
             WaterFieldMath.WideBlur(o.Calm, o.GW, o.GH);
+            yield return false;
             WaterFieldMath.WideBlur(o.Calm, o.GW, o.GH);
+            yield return false;
             o.Clearance = CompatSections.Distance(o.GW, o.GH, i => covered[i], 64f);
+            yield return false;
             o.Seam = new WaterSeam(w, h);
             o.Seam.Capture(fieldFor.Invoke(null, new object[] { map }), "Corner", "WaveDistance", "Strength", "Reach",
                 "NotFrozen", "Clearance", "Blocked", "Covered", "AlongFirstDirection", "WaveSlope");
-            return o;
+            result.Value = o;
         }
 
         private static void BuildReach(OutsideShore o, bool[] inland)
@@ -335,38 +346,71 @@ namespace EndlessHorizon
             return false;
         }
 
-        public static (int, int, int) Revision(Map map)
-        {
-            object field = fieldFor.Invoke(null, new object[] { map });
-            return ((int)version.GetValue(field), (int)localVersion.GetValue(field), 0);
-        }
+        public static ICompatBuild Begin(HorizonState s, IOutsideCompatLayer previous, List<CellRect> areas) =>
+            new StripBuild<OutsideShore>(s, h => BuildShoreSteps(s, h), SeaNear, o => Building = o, () => Building = null,
+                layerType, l => new Layer(l), o => WatchOf(s)?.Learn(s, o), previous, areas);
 
-        public static IOutsideCompatLayer Build(HorizonState s)
+        private static readonly ConditionalWeakTable<HorizonState, WavesWatch> watches = new ConditionalWeakTable<HorizonState, WavesWatch>();
+
+        private static WavesWatch WatchOf(HorizonState s) => watches.TryGetValue(s, out WavesWatch w) ? w : null;
+
+        public static ICompatWatch Watch(HorizonState s) => watches.GetValue(s, _ => new WavesWatch());
+
+        private sealed class WavesWatch : ICompatWatch
         {
-            OutsideShore o = BuildShore(s);
-            if (o == null) return null;
-            var layers = new List<(CellRect, SectionLayer)>();
-            Building = o;
-            try
+            private bool started;
+            private int lastVersion, lastLocal;
+            private readonly List<CellRect> seaSections = new List<CellRect>();
+
+            public void Learn(HorizonState s, OutsideShore o)
             {
-                foreach (CellRect strip in CompatSections.OutsideStrips(s.map, s.RingWidth))
+                seaSections.Clear();
+                if (o == null) return;
+                int w = s.map.Size.x, h = s.map.Size.z, size = Section.Size;
+                for (int x = 0; x < w; x += size)
                 {
-                    if (!SeaNear(o, strip)) continue;
-                    var layer = (SectionLayer)Activator.CreateInstance(layerType, CompatSections.StandIn(s.map, strip));
-                    layers.Add((strip, layer));
-                    layer.Regenerate();
+                    for (int z = 0; z < h; z += size)
+                    {
+                        if (x > 0 && z > 0 && x + size < w && z + size < h) continue;
+                        var section = new CellRect(x, z, size, size);
+                        foreach (IntVec3 c in section.ExpandedBy(8))
+                        {
+                            if (o.KindAt(c.x, c.z) != 0)
+                            {
+                                seaSections.Add(section);
+                                break;
+                            }
+                        }
+                    }
                 }
             }
-            catch
+
+            public void Poll(HorizonState s, List<CellRect> areas, ref bool global)
             {
-                CompatSections.Destroy(layers);
-                throw;
+                object field = (peek ?? fieldFor).Invoke(null, new object[] { s.map });
+                if (field == null) return;
+                int v = (int)version.GetValue(field), lv = (int)localVersion.GetValue(field);
+                if (started)
+                {
+                    if (v != lastVersion) global = true;
+                    else if (lv != lastLocal)
+                    {
+                        if (touchedSince == null) global = true;
+                        else
+                        {
+                            foreach (CellRect section in seaSections)
+                            {
+                                if ((bool)touchedSince.Invoke(field, new object[] { section, lastLocal })) areas.Add(section);
+                            }
+                        }
+                    }
+                }
+                started = true;
+                lastVersion = v;
+                lastLocal = lv;
             }
-            finally
-            {
-                Building = null;
-            }
-            return layers.Count == 0 ? null : new Layer(layers);
+
+            public bool Relevant(HorizonState s, IntVec3 loc) => CompatSections.WaterWithin(s, loc, 8, t => t.defName == "WaterOceanDeep" || t.defName == "WaterOceanShallow");
         }
 
         private static bool SeaNear(OutsideShore o, CellRect strip)
@@ -378,28 +422,24 @@ namespace EndlessHorizon
             return false;
         }
 
-        private sealed class Layer : IOutsideCompatLayer
+        private sealed class Layer : StripLayer
         {
-            private readonly List<(CellRect rect, SectionLayer layer)> layers;
             private readonly List<LayerSubMesh> glow = new List<LayerSubMesh>();
 
-            public Layer(List<(CellRect, SectionLayer)> layers)
+            public Layer(List<(CellRect, SectionLayer)> layers) : base(layers)
             {
-                this.layers = layers;
                 foreach ((CellRect _, SectionLayer layer) in layers)
                 {
                     if (layerGlow.GetValue(layer) is List<LayerSubMesh> g) glow.AddRange(g);
                 }
             }
 
-            public int Draw(CellRect view)
+            public override int Draw(CellRect view)
             {
                 bool on = (bool)glowing.GetValue(null);
                 for (int i = 0; i < glow.Count; i++) glow[i].disabled = !on;
-                return CompatSections.DrawLayers(layers, view);
+                return CompatSections.DrawLayers(Layers, view);
             }
-
-            public void Dispose() => CompatSections.Destroy(layers);
         }
     }
 }

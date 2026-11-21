@@ -84,6 +84,24 @@ namespace EndlessHorizon
             layers.Clear();
         }
 
+        public static bool WaterWithin(HorizonState s, IntVec3 loc, int radius, Func<TerrainDef, bool> water)
+        {
+            Map map = s.map;
+            foreach (IntVec3 c in CellRect.CenteredOn(loc, radius))
+            {
+                TerrainDef t = c.InBounds(map) ? map.terrainGrid.BaseTerrainAt(c) : s.Field?.At(c);
+                if (t != null && water(t)) return true;
+            }
+            return false;
+        }
+
+        public static int Gap(CellRect a, CellRect b)
+        {
+            int dx = Math.Max(0, Math.Max(a.minX - b.maxX, b.minX - a.maxX));
+            int dz = Math.Max(0, Math.Max(a.minZ - b.maxZ, b.minZ - a.maxZ));
+            return Math.Max(dx, dz);
+        }
+
         public static float[] Distance(int w, int h, Func<int, bool> source, float cap)
         {
             var d = new float[w * h];

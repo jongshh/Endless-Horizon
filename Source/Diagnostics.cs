@@ -91,6 +91,7 @@ namespace EndlessHorizon
                 Section(sb, "edges", b => Edges(b, map));
                 Section(sb, "water and ice", b => Water(b, map));
             }
+            Section(sb, "timings", HorizonPerf.Report);
             Section(sb, "recent log", RecentLog);
             return Mask(sb.ToString());
         }

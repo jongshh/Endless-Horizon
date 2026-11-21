@@ -10,6 +10,7 @@ namespace EndlessHorizon
     public static class Compat_LivingWaters
     {
         private static Type fieldType, layerType, levelsType;
+        private static MethodInfo peek, iceTouchedSince;
         private static MethodInfo fieldFor, classify, alongCorner, flavorOf, lakeAt, caveNear, swampNear;
         private static FieldInfo alongCells;
         private static PropertyInfo version, iceVersion, floodVersion;
@@ -38,6 +39,8 @@ namespace EndlessHorizon
             version = AccessTools.Property(fieldType, "Version");
             iceVersion = AccessTools.Property(fieldType, "IceVersion");
             floodVersion = AccessTools.Property(fieldType, "FloodVersion");
+            peek = AccessTools.Method(fieldType, "Peek", new[] { typeof(Map) });
+            iceTouchedSince = AccessTools.Method(fieldType, "IceTouchedSince", new[] { typeof(int), typeof(CellRect) });
             if (fieldFor == null || classify == null || classify.ReturnType != typeof(byte) || alongCorner == null
                 || flavorOf == null || flavorOf.ReturnType != typeof(byte) || lakeAt == null || caveNear == null || swampNear == null
                 || alongCells?.FieldType != typeof(float[]) || version?.PropertyType != typeof(int)
@@ -194,7 +197,7 @@ namespace EndlessHorizon
             public float Extent, Roofed, Marshy;
         }
 
-        private static OutsideWater BuildWater(HorizonState s)
+        private static IEnumerable<bool> BuildWaterSteps(HorizonState s, StripBuild<OutsideWater>.Holder result)
         {
             Map map = s.map;
             RiverExtension river = s.Field.River;
@@ -224,30 +227,37 @@ namespace EndlessHorizon
                         t = s.Field.At(c) ?? s.Field.At(new IntVec3(Mathf.Clamp(x, -s.RingWidth, w + s.RingWidth - 1), 0, Mathf.Clamp(z, -s.RingWidth, h + s.RingWidth - 1)));
                         if (s.Mountains != null && s.Mountains.IsRock(x, z)) t = null;
                     }
-                    byte k = t == null ? (byte)0 : (byte)classify.Invoke(null, new object[] { t });
+                    byte k = t == null ? (byte)0 : KindOf(t);
                     o.Kind[i] = k;
                     deep[i] = k != 0 && k != 3 && t.passability == Traversability.Impassable;
                     soggy[i] = k == 0 && t != null && (t.defName.Contains("Marsh") || t.defName.Contains("Mud"));
-                    o.Flavor[i] = k != 0 && k != 4 ? (byte)flavorOf.Invoke(null, new object[] { t }) : (byte)0;
+                    o.Flavor[i] = k != 0 && k != 4 ? FlavorOf(t) : (byte)0;
                     o.Roofed[i] = o.InMap(x, z) ? map.roofGrid.RoofAt(c)?.isNatural ?? false : s.Field.OutsideThickRoof(c);
                     o.Frozen[i] = o.InMap(x, z) ? RimWorld.TerrainDefOf.ThinIce != null && map.terrainGrid.TempTerrainAt(c) == RimWorld.TerrainDefOf.ThinIce : s.Field.FrozenAt(c);
                     if (!o.InMap(x, z) && (k == 1 || k == 2 || k == 3)) any = true;
                 }
+                if (((z + r) & 31) == 31) yield return false;
             }
-            if (!any) return null;
+            if (!any) yield break;
             bool Water(int i) => o.Kind[i] == 1 || o.Kind[i] == 2 || o.Kind[i] == 4;
             o.Signed = Signed(o, i => Water(i));
+            yield return false;
             o.Deep = Signed(o, i => Water(i) && deep[i]);
+            yield return false;
             if (Array.IndexOf(o.Frozen, true) >= 0) o.Ice = Signed(o, i => o.Frozen[i]);
             else { o.Ice = new float[n]; Array.Fill(o.Ice, -5.5f); }
             o.Sea = CompatSections.Distance(o.GW, o.GH, i => o.Kind[i] == 4, 18f);
+            yield return false;
             object field = fieldFor.Invoke(null, new object[] { map });
             o.Seam = new WaterSeam(w, h);
             o.Seam.Capture(field, "Corner", "DeepCorner", "IceCorner", "AlongCorner", "AwayFromSea", "NotFrozen", "MarshCorner", "MarshReach",
                 "MovingNear", "StillNear", "OursNear", "MarshNear", "FlavorNear");
+            yield return false;
             SpreadFlavor(o);
             BuildMarsh(o);
+            yield return false;
             FindLakes(o, soggy, field);
+            yield return false;
 
             o.Along = new float[n];
             var realAlong = (float[])alongCells.GetValue(field);
@@ -281,7 +291,30 @@ namespace EndlessHorizon
                     }
                 }
             }
-            return o;
+            result.Value = o;
+        }
+
+        private static readonly Dictionary<TerrainDef, byte> kinds = new Dictionary<TerrainDef, byte>();
+        private static readonly Dictionary<TerrainDef, byte> flavors = new Dictionary<TerrainDef, byte>();
+
+        private static byte KindOf(TerrainDef t)
+        {
+            if (!kinds.TryGetValue(t, out byte k))
+            {
+                k = (byte)classify.Invoke(null, new object[] { t });
+                kinds[t] = k;
+            }
+            return k;
+        }
+
+        private static byte FlavorOf(TerrainDef t)
+        {
+            if (!flavors.TryGetValue(t, out byte f))
+            {
+                f = (byte)flavorOf.Invoke(null, new object[] { t });
+                flavors[t] = f;
+            }
+            return f;
         }
 
         private static void SpreadFlavor(OutsideWater o)
@@ -673,38 +706,41 @@ namespace EndlessHorizon
             return false;
         }
 
-        public static (int, int, int) Revision(Map map)
-        {
-            object field = fieldFor.Invoke(null, new object[] { map });
-            return ((int)version.GetValue(field), (int)iceVersion.GetValue(field), (int)floodVersion.GetValue(field));
-        }
+        public static ICompatBuild Begin(HorizonState s, IOutsideCompatLayer previous, List<CellRect> areas) =>
+            new StripBuild<OutsideWater>(s, h => BuildWaterSteps(s, h), FreshNear, o => Building = o, () => Building = null,
+                layerType, l => new StripLayer(l), null, previous, areas);
 
-        public static IOutsideCompatLayer Build(HorizonState s)
+        public static ICompatWatch Watch(HorizonState s) => new RiversWatch();
+
+        private sealed class RiversWatch : ICompatWatch
         {
-            OutsideWater o = BuildWater(s);
-            if (o == null) return null;
-            var layers = new List<(CellRect, SectionLayer)>();
-            Building = o;
-            try
+            private bool started;
+            private int lastVersion, lastIce, lastFlood;
+
+            public void Poll(HorizonState s, List<CellRect> areas, ref bool global)
             {
-                foreach (CellRect strip in CompatSections.OutsideStrips(s.map, s.RingWidth))
+                object field = (peek ?? fieldFor).Invoke(null, new object[] { s.map });
+                if (field == null) return;
+                int v = (int)version.GetValue(field), ice = (int)iceVersion.GetValue(field), flood = (int)floodVersion.GetValue(field);
+                if (started)
                 {
-                    if (!FreshNear(o, strip)) continue;
-                    var layer = (SectionLayer)Activator.CreateInstance(layerType, CompatSections.StandIn(s.map, strip));
-                    layers.Add((strip, layer));
-                    layer.Regenerate();
+                    if (v != lastVersion || flood != lastFlood) global = true;
+                    else if (ice != lastIce)
+                    {
+                        int w = s.map.Size.x, h = s.map.Size.z, d = 10;
+                        foreach (CellRect band in new[] { new CellRect(0, 0, w, d), new CellRect(0, h - d, w, d), new CellRect(0, 0, d, h), new CellRect(w - d, 0, d, h) })
+                        {
+                            if (iceTouchedSince == null || (bool)iceTouchedSince.Invoke(field, new object[] { lastIce, band })) areas.Add(band);
+                        }
+                    }
                 }
+                started = true;
+                lastVersion = v;
+                lastIce = ice;
+                lastFlood = flood;
             }
-            catch
-            {
-                CompatSections.Destroy(layers);
-                throw;
-            }
-            finally
-            {
-                Building = null;
-            }
-            return layers.Count == 0 ? null : new Layer(layers);
+
+            public bool Relevant(HorizonState s, IntVec3 loc) => CompatSections.WaterWithin(s, loc, 8, t => t.IsWater);
         }
 
         private static bool FreshNear(OutsideWater o, CellRect strip)
@@ -717,15 +753,5 @@ namespace EndlessHorizon
             return false;
         }
 
-        private sealed class Layer : IOutsideCompatLayer
-        {
-            private readonly List<(CellRect rect, SectionLayer layer)> layers;
-
-            public Layer(List<(CellRect, SectionLayer)> layers) => this.layers = layers;
-
-            public int Draw(CellRect view) => CompatSections.DrawLayers(layers, view);
-
-            public void Dispose() => CompatSections.Destroy(layers);
-        }
     }
 }

@@ -67,7 +67,7 @@ namespace EndlessHorizon
 
     public class EndlessHorizonMod : Mod
     {
-        public const string Version = "1.0.0.3";
+        public const string Version = "1.0.0.3hf";
         public const string LogPrefix = "[Endless Horizon] ";
 
         public static HorizonSettings Settings;
