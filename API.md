@@ -128,6 +128,10 @@ The rule:
    **current**.
 3. When `Observe` reports your step ID, that ring is on screen: make pending current.
 
+`IsBuilding` is true only while EH is inside a build step or a layer regeneration for the ring being built. It is not
+true for the whole time that ring is built in the background: between those callbacks it is false, and everything
+answers from current, like the ring on screen.
+
 Queries inside build and regenerate callbacks answer from the ring being built; everything else answers from the ring on
 screen. Notifications arrive after the change is on screen. This holds for EH's own values. Each mod rebuilds on its own,
 so two mods' channels can come from different builds.
@@ -281,7 +285,7 @@ Namespace `EndlessHorizon.Api`: five static classes, game and BCL types only.
 | `bool Has(string id)` | The channel, scope, replacement ID or draw stage exists and has not failed. A replaced or restored presentation still counts. |
 | `bool IsActive(Map map)` | EH draws this map. |
 | `bool IsBuilt(Map map)` | A complete ring exists. |
-| `bool IsBuilding(Map map)` | EH is building a ring of this map that is not on screen yet. Answer from pending while true. |
+| `bool IsBuilding(Map map)` | EH is running a build step or regenerating a registered layer for a ring of this map that is not on screen yet. True only inside those callbacks, not for the whole background build. Answer from pending while true. |
 | `int RingWidth(Map map)` | Ring width in cells, `0` when not active. |
 | `int FogStart(Map map)` | Cells past the edge where the fog starts to thicken. |
 | `bool FogShown(Map map)` | The edge fog is drawn. If false, something must cover the void past the ring. |
