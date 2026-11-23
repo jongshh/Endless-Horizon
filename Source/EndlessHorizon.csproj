@@ -6,8 +6,10 @@
     <Nullable>disable</Nullable>
     <AssemblyName>EndlessHorizon</AssemblyName>
     <RootNamespace>EndlessHorizon</RootNamespace>
-    <Version>1.0.0.3</Version>
-    <InformationalVersion>1.0.0.3hf</InformationalVersion>
+    <Version>1.0.0.4</Version>
+    <AssemblyVersion>1.0.0.4</AssemblyVersion>
+    <InformationalVersion>1.0.0.4</InformationalVersion>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <OutputPath>../Assemblies/</OutputPath>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
