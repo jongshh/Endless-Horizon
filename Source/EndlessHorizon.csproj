@@ -6,9 +6,9 @@
     <Nullable>disable</Nullable>
     <AssemblyName>EndlessHorizon</AssemblyName>
     <RootNamespace>EndlessHorizon</RootNamespace>
-    <Version>1.0.0.4</Version>
+    <Version>1.0.0.5</Version>
     <AssemblyVersion>1.0.0.4</AssemblyVersion>
-    <InformationalVersion>1.0.0.4</InformationalVersion>
+    <InformationalVersion>1.0.0.5</InformationalVersion>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <OutputPath>../Assemblies/</OutputPath>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>

@@ -75,6 +75,14 @@ namespace EndlessHorizon
         }
 #endif
 
+        public static string BuiltLine(HorizonState s)
+        {
+            string outside = s.Field.OutsideMode ?? "unknown";
+            int detail = outside.IndexOf(':');
+            if (detail >= 0) outside = outside.Substring(0, detail) + ")";
+            return $"Ring built: map {s.Domain.W}x{s.Domain.H}, ring {s.RingWidth}, outside={outside}, {s.BuildMs} ms ({s.BuildReason}).";
+        }
+
         public static string BuildLine(HorizonState s)
         {
             Map map = s.map;

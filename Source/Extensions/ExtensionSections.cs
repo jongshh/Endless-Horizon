@@ -44,12 +44,23 @@ namespace EndlessHorizon
             return Math.Max(dx, dz);
         }
 
+        private static readonly ConditionalWeakTable<SectionLayer, object> freed = new ConditionalWeakTable<SectionLayer, object>();
+
         internal static void Free(SectionLayer layer)
         {
-            if (layer.subMeshes == null) return;
-            foreach (LayerSubMesh sm in layer.subMeshes)
+            if (layer == null || layer.subMeshes == null) return;
+            if (freed.TryGetValue(layer, out _)) return;
+            freed.Add(layer, null);
+            layer.subMeshes.RemoveAll(sm => sm == null || sm.mesh == null);
+            try { layer.Dispose(); }
+            catch (Exception ex)
             {
-                if (sm.mesh != null) UnityEngine.Object.Destroy(sm.mesh);
+                string owner = ExtensionRegistry.LayerOf(layer.GetType())?.Owner ?? "unknown owner";
+                Log.ErrorOnce($"{HorizonLog.Prefix}Disposing {layer.GetType().FullName} ({owner}) failed; its sub-meshes are destroyed directly. {ex}",
+                    layer.GetType().GetHashCode() ^ 0x45484446);
+                foreach (LayerSubMesh sm in layer.subMeshes)
+                    if (sm.mesh != null) UnityEngine.Object.Destroy(sm.mesh);
+                layer.subMeshes.Clear();
             }
         }
     }

@@ -21,10 +21,10 @@ namespace EndlessHorizon
         public static void OnBuilt(HorizonState s)
         {
             Map map = s.map;
+#if EH_DEV
             Log.Message(EndlessHorizonMod.LogPrefix + Tag + HorizonDiagnostics.BuildLine(s));
             GenReconstruction recon = GenReconstruction.For(map);
             Log.Message($"{EndlessHorizonMod.LogPrefix}generator match (6a test): {recon.Report}, {recon.Ms} ms.");
-#if EH_DEV
             if (s.Field.River != null)
             {
                 foreach (RiverCrossing c in s.Field.River.Crossings)
@@ -32,6 +32,8 @@ namespace EndlessHorizon
                     Log.Message($"{EndlessHorizonMod.LogPrefix}{Tag}river {c}");
                 }
             }
+#else
+            Log.Message(EndlessHorizonMod.LogPrefix + HorizonDiagnostics.BuiltLine(s));
 #endif
             if (EndlessHorizonMod.ProbeMode)
             {
