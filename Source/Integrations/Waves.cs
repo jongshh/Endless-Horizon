@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Reflection;
+using System.Reflection.Emit;
 using System.Runtime.CompilerServices;
 using EndlessHorizon.Api;
 using HarmonyLib;
@@ -12,13 +13,20 @@ namespace EndlessHorizon
     internal static class Compat_Waves
     {
         private static Type fieldType, layerType, levelsType, materialsType;
-        private static MethodInfo fieldFor, peek, touchedSince;
+        private static MethodInfo fieldFor, peek, touchedSince, hasRow;
         private static PropertyInfo glowing;
         private static FieldInfo layerGlow;
         private static PropertyInfo version, localVersion;
+        private static Harmony patcher;
 
         private const string Owner = "waves", Step = Owner + ".field", ShoreScope = Owner + ".shore";
         private static readonly StepResult<OutsideShore> shores = new StepResult<OutsideShore>();
+
+        internal static ShoreApi shoreApi;
+        private static bool dropPending;
+        private static int epoch;
+
+        public static string Detail { get; private set; } = "";
 
         internal static OutsideShore Building;
         internal static OutsideShore Inner;
@@ -50,24 +58,25 @@ namespace EndlessHorizon
             MethodInfo regenerate = AccessTools.DeclaredMethod(layerType, "Regenerate", Type.EmptyTypes);
             if (regenerate == null) return "SectionLayer_Waves.Regenerate missing";
             layerSection = AccessTools.FieldRefAccess<SectionLayer, Section>("section");
-            var blended = new List<(MethodInfo target, string postfix)>
+            var blended = new List<(MethodInfo target, string postfix, string prefix)>
             {
-                (AccessTools.Method(fieldType, "Corner", two), nameof(CornerPostfix)),
-                (AccessTools.Method(fieldType, "WaveDistance", two), nameof(WaveDistancePostfix)),
-                (AccessTools.Method(fieldType, "Strength", two), nameof(StrengthPostfix)),
-                (AccessTools.Method(fieldType, "Reach", two), nameof(ReachPostfix)),
-                (AccessTools.Method(fieldType, "Clearance", two), nameof(ClearancePostfix)),
+                (AccessTools.Method(fieldType, "Corner", two), nameof(CornerPostfix), nameof(CornerPrefix)),
+                (AccessTools.Method(fieldType, "WaveDistance", two), nameof(WaveDistancePostfix), nameof(WaveDistancePrefix)),
+                (AccessTools.Method(fieldType, "Strength", two), nameof(StrengthPostfix), nameof(StrengthPrefix)),
+                (AccessTools.Method(fieldType, "Reach", two), nameof(ReachPostfix), nameof(ReachPrefix)),
+                (AccessTools.Method(fieldType, "Clearance", two), nameof(ClearancePostfix), nameof(ClearancePrefix)),
             };
-            foreach ((MethodInfo target, string _) in blended)
+            foreach ((MethodInfo target, string _, string _) in blended)
             {
                 if (target == null || target.ReturnType != typeof(float)) return "a ShoreField method is missing or changed";
             }
+            hasRow = AccessTools.Method(fieldType, "HasRow", new[] { typeof(int) });
             var patches = new List<(MethodInfo target, string prefix)>
             {
                 (AccessTools.Method(fieldType, "NotFrozen", two), nameof(OnePrefix)),
                 (AccessTools.Method(fieldType, "Covered", two), nameof(CoveredPrefix)),
                 (AccessTools.Method(fieldType, "Blocked", two), nameof(BlockedPrefix)),
-                (AccessTools.Method(fieldType, "HasRow", new[] { typeof(int) }), nameof(HasRowPrefix)),
+                (hasRow, nameof(HasRowPrefix)),
                 (AccessTools.Method(layerType, "WaterNear", new[] { typeof(CellRect) }), nameof(WaterNearPrefix)),
                 (AccessTools.Method(levelsType, "IsStandIn", new[] { typeof(Section) }), nameof(IsStandInPrefix)),
             };
@@ -77,15 +86,60 @@ namespace EndlessHorizon
             }
             if (AccessTools.Method(fieldType, "Corner", two).ReturnType != typeof(float)
                 || AccessTools.Method(fieldType, "Covered", two).ReturnType != typeof(bool)) return "ShoreField signatures changed";
-            foreach ((MethodInfo target, string postfix) in blended)
-                harmony.Patch(target, postfix: new HarmonyMethod(typeof(Compat_Waves), postfix));
+            ShoreApi bound = ShoreApi.Bind(api, out string legacyWhy);
+            patcher = harmony;
+            foreach ((MethodInfo target, string postfix, string prefix) in blended)
+                harmony.Patch(target, prefix: bound != null ? new HarmonyMethod(typeof(Compat_Waves), prefix) : null,
+                    postfix: new HarmonyMethod(typeof(Compat_Waves), postfix));
             harmony.Patch(regenerate, prefix: new HarmonyMethod(typeof(Compat_Waves), nameof(RegeneratePrefix)),
                 finalizer: new HarmonyMethod(typeof(Compat_Waves), nameof(RegenerateFinalizer)));
             foreach ((MethodInfo target, string prefix) in patches)
             {
+                if (target == hasRow)
+                {
+                    if (bound != null) continue;
+                    rowsPatched = true;
+                }
                 harmony.Patch(target, prefix: new HarmonyMethod(typeof(Compat_Waves), prefix));
             }
-            return Register(harmony);
+            string failed = Register(harmony);
+            if (failed != null) return failed;
+            if (bound != null)
+            {
+                try
+                {
+                    bound.Add();
+                    shoreApi = bound;
+                }
+                catch (Exception ex)
+                {
+                    Log.Error(IntegrationLog.Prefix + "Registering with Waves' own API 4 failed; Waves is followed through patches as before. " + ex);
+                    legacyWhy = "adding the provider failed";
+                    PatchRows();
+                }
+            }
+            SetMode(shoreApi != null
+                ? "provider mode (WavesApi " + shoreApi.Version + "): Waves asks EH about the sea past the map edge"
+                : "legacy mode (" + legacyWhy + ")");
+            return null;
+        }
+
+        private static void SetMode(string detail)
+        {
+            Detail = detail;
+            HorizonInfo.Report(Owner, "mode", detail);
+#if EH_DEV
+            Log.Message(IntegrationLog.Prefix + "Waves: " + detail);
+#endif
+        }
+
+        private static bool rowsPatched;
+
+        private static void PatchRows()
+        {
+            if (rowsPatched || patcher == null || hasRow == null) return;
+            rowsPatched = true;
+            patcher.Patch(hasRow, prefix: new HarmonyMethod(typeof(Compat_Waves), nameof(HasRowPrefix)));
         }
 
         private static string Register(Harmony harmony)
@@ -211,6 +265,45 @@ namespace EndlessHorizon
                     for (int dx = -2; dx <= 1; dx++) kind = Math.Max(kind, KindAt(x + dx, z + dz));
                 return kind == 2 ? 1f : kind == 1 ? 0.5f : 0f;
             }
+
+            internal bool PastRect(int x, int z) => x < 0 || z < 0 || x > W || z > H;
+
+            internal bool WindowPastRect(int x, int z) => x < -1 || z < -1 || x > W + 1 || z > H + 1;
+
+            internal const int AskedBand = 4;
+
+            private bool bandKnown;
+            private ulong band;
+
+            internal ulong Band
+            {
+                get
+                {
+                    if (bandKnown) return band;
+                    ulong h = 0x45485741u;
+                    void Add(uint v)
+                    {
+                        h = (h ^ v) * 0x9E3779B97F4A7C15UL;
+                        h ^= h >> 29;
+                    }
+                    Add((uint)W);
+                    Add((uint)H);
+                    for (int z = -AskedBand; z < H + AskedBand; z++)
+                        for (int x = -AskedBand; x < W + AskedBand; x++)
+                        {
+                            if (x == 0 && z >= 0 && z < H) x = W;
+                            int i = Idx(x, z);
+                            Add((uint)BitConverter.SingleToInt32Bits(Signed[i]));
+                            Add((uint)BitConverter.SingleToInt32Bits(Calm[i]));
+                            Add((uint)BitConverter.SingleToInt32Bits(Reach[i]));
+                            Add((uint)BitConverter.SingleToInt32Bits(Clearance[i]));
+                            Add(Kind[i] | (Rock[i] ? 0x100u : 0u) | (Frozen[i] ? 0x200u : 0u) | (CoveredAt(x, z) ? 0x400u : 0u));
+                        }
+                    band = h;
+                    bandKnown = true;
+                    return h;
+                }
+            }
         }
 
         private static IEnumerable<bool> BuildShoreSteps(Map map)
@@ -292,7 +385,7 @@ namespace EndlessHorizon
             yield return false;
             o.Clearance = IntegrationWater.Distance(o.GW, o.GH, i => covered[i], 64f);
             yield return false;
-            o.Version = (int)version.GetValue(fieldFor.Invoke(null, new object[] { map }));
+            o.Version = ReadShore(map, true, out int now, out _, out _) ? now : -1;
             shores.Made(map, o);
         }
 
@@ -369,10 +462,50 @@ namespace EndlessHorizon
 
         private static float Mix(float own, float composite, float share) => share >= 1f ? composite : own + (composite - own) * share;
 
+        public static bool CornerPrefix(int __0, int __1, ref float __result)
+        {
+            OutsideShore o = Context;
+            if (o == null || !Asked(o) || !o.PastRect(__0, __1)) return true;
+            __result = o.Corner(__0, __1);
+            return false;
+        }
+
+        public static bool WaveDistancePrefix(int __0, int __1, ref float __result)
+        {
+            OutsideShore o = Context;
+            if (o == null || !Asked(o) || !o.PastRect(__0, __1)) return true;
+            __result = o.WaveDistance(__0, __1);
+            return false;
+        }
+
+        public static bool StrengthPrefix(int __0, int __1, ref float __result)
+        {
+            OutsideShore o = Context;
+            if (o == null || !Asked(o) || !o.WindowPastRect(__0, __1)) return true;
+            __result = o.StrengthAt(__0, __1);
+            return false;
+        }
+
+        public static bool ReachPrefix(int __0, int __1, ref float __result)
+        {
+            OutsideShore o = Context;
+            if (o == null || !Asked(o) || !o.PastRect(__0, __1)) return true;
+            __result = o.ReachAt(__0, __1);
+            return false;
+        }
+
+        public static bool ClearancePrefix(int __0, int __1, ref float __result)
+        {
+            OutsideShore o = Context;
+            if (o == null || !Asked(o) || !o.PastRect(__0, __1)) return true;
+            __result = o.ClearanceAt(__0, __1);
+            return false;
+        }
+
         public static void CornerPostfix(int __0, int __1, ref float __result)
         {
             OutsideShore o = Context;
-            if (o == null) return;
+            if (o == null || Asked(o) && o.PastRect(__0, __1)) return;
             float share = o.Share(__0, __1);
             if (share > 0f) __result = Mix(__result, o.Corner(__0, __1), share);
         }
@@ -380,7 +513,7 @@ namespace EndlessHorizon
         public static void WaveDistancePostfix(int __0, int __1, ref float __result)
         {
             OutsideShore o = Context;
-            if (o == null) return;
+            if (o == null || Asked(o) && o.PastRect(__0, __1)) return;
             float share = o.Share(__0, __1);
             if (share > 0f) __result = Mix(__result, o.WaveDistance(__0, __1), share);
         }
@@ -388,7 +521,7 @@ namespace EndlessHorizon
         public static void StrengthPostfix(int __0, int __1, ref float __result)
         {
             OutsideShore o = Context;
-            if (o == null) return;
+            if (o == null || Asked(o) && o.WindowPastRect(__0, __1)) return;
             float share = o.Share(__0, __1);
             if (share > 0f) __result = Mathf.Clamp01(Mix(__result, o.StrengthAt(__0, __1), share));
         }
@@ -396,7 +529,7 @@ namespace EndlessHorizon
         public static void ReachPostfix(int __0, int __1, ref float __result)
         {
             OutsideShore o = Context;
-            if (o == null) return;
+            if (o == null || Asked(o) && o.PastRect(__0, __1)) return;
             float share = o.Share(__0, __1);
             if (share > 0f) __result = Mathf.Clamp01(Mix(__result, o.ReachAt(__0, __1), share));
         }
@@ -404,7 +537,7 @@ namespace EndlessHorizon
         public static void ClearancePostfix(int __0, int __1, ref float __result)
         {
             OutsideShore o = Context;
-            if (o == null) return;
+            if (o == null || Asked(o) && o.PastRect(__0, __1)) return;
             float share = o.Share(__0, __1);
             if (share > 0f) __result = Math.Max(0f, Mix(__result, o.ClearanceAt(__0, __1), share));
         }
@@ -459,6 +592,270 @@ namespace EndlessHorizon
             return false;
         }
 
+        internal sealed class ShoreApi
+        {
+            internal const int Needed = 4;
+
+            private static readonly Type[] CellArguments =
+                { typeof(float), typeof(float), typeof(float), typeof(float), typeof(bool), typeof(bool), typeof(bool), typeof(float) };
+
+            internal static readonly string[] CellNames = { "distance", "strength", "reach", "calmDistance", "covered", "frozen", "blocked", "clearance" };
+
+            internal int Version;
+            internal Type DelegateType, CellType, LayoutType;
+            internal Delegate Provider;
+            private MethodInfo add, remove, shore, touchedSince;
+            private Action<Map> changed;
+            private PropertyInfo isValid, layoutVersion, layoutLocal;
+
+            internal static ShoreApi Bind(Type api, out string why)
+            {
+                try { return Look(api, out why); }
+                catch (Exception ex)
+                {
+                    why = "WavesApi 4 could not be bound: " + ex.GetType().Name;
+                    Log.Error(IntegrationLog.Prefix + "Waves' own API 4 could not be bound; Waves is followed through patches as before. " + ex);
+                    return null;
+                }
+            }
+
+            private static ShoreApi Look(Type api, out string why)
+            {
+                const BindingFlags Static = BindingFlags.Public | BindingFlags.Static, Instance = BindingFlags.Public | BindingFlags.Instance;
+                object number = api?.GetProperty("Version", Static)?.GetValue(null);
+                if (!(number is int v) || v < Needed)
+                {
+                    why = "WavesApi.Version " + (number ?? "missing") + ", the provider needs " + Needed;
+                    return null;
+                }
+                MethodInfo add = api.GetMethod("AddShoreBeyondMap", Static);
+                ParameterInfo[] added = add?.GetParameters();
+                Type provider = added != null && added.Length == 1 ? added[0].ParameterType : null;
+                if (provider == null || add.ReturnType != typeof(void) || provider.FullName != "RimWorldWaves.ShoreBeyondMap"
+                    || !typeof(MulticastDelegate).IsAssignableFrom(provider))
+                {
+                    why = "WavesApi.AddShoreBeyondMap(ShoreBeyondMap) missing";
+                    return null;
+                }
+                MethodInfo invoke = provider.GetMethod("Invoke");
+                ParameterInfo[] parameters = invoke?.GetParameters();
+                if (parameters == null || invoke.ReturnType != typeof(bool) || parameters.Length != 4 || parameters[0].ParameterType != typeof(Map)
+                    || parameters[1].ParameterType != typeof(int) || parameters[2].ParameterType != typeof(int) || !parameters[3].ParameterType.IsByRef || !parameters[3].IsOut)
+                {
+                    why = "ShoreBeyondMap is not bool (Map, int, int, out ShoreCell)";
+                    return null;
+                }
+                Type cell = parameters[3].ParameterType.GetElementType();
+                ConstructorInfo make = cell?.GetConstructor(CellArguments);
+                if (make == null || !cell.IsValueType || cell.FullName != "RimWorldWaves.ShoreCell")
+                {
+                    why = "ShoreCell(float, float, float, float, bool, bool, bool, float) missing";
+                    return null;
+                }
+                ParameterInfo[] names = make.GetParameters();
+                for (int i = 0; i < names.Length; i++)
+                {
+                    if (names[i].Name == CellNames[i]) continue;
+                    why = "ShoreCell's constructor changed (" + names[i].Name + " where " + CellNames[i] + " was)";
+                    return null;
+                }
+                MethodInfo remove = api.GetMethod("RemoveShoreBeyondMap", Static, null, new[] { provider }, null);
+                MethodInfo changedAt = api.GetMethod("ShoreBeyondMapChanged", Static, null, new[] { typeof(Map) }, null);
+                MethodInfo shore = api.GetMethod("Shore", Static, null, new[] { typeof(Map) }, null);
+                if (remove == null || changedAt == null || shore == null || changedAt.ReturnType != typeof(void))
+                {
+                    why = "WavesApi.RemoveShoreBeyondMap, ShoreBeyondMapChanged or Shore missing";
+                    return null;
+                }
+                Type layout = shore.ReturnType;
+                PropertyInfo isValid = layout.GetProperty("IsValid", Instance), layoutVersion = layout.GetProperty("Version", Instance),
+                    layoutLocal = layout.GetProperty("LocalVersion", Instance);
+                MethodInfo touchedSince = layout.GetMethod("TouchedSince", Instance, null, new[] { typeof(CellRect), typeof(int) }, null);
+                if (!layout.IsValueType || layout.FullName != "RimWorldWaves.ShoreLayout" || isValid?.PropertyType != typeof(bool)
+                    || layoutVersion?.PropertyType != typeof(int) || layoutLocal?.PropertyType != typeof(int) || touchedSince?.ReturnType != typeof(bool))
+                {
+                    why = "ShoreLayout.IsValid, Version, LocalVersion or TouchedSince missing";
+                    return null;
+                }
+
+                var method = new DynamicMethod("EndlessHorizon_NewShoreCell", cell, CellArguments, typeof(Compat_Waves).Module, true);
+                ILGenerator il = method.GetILGenerator();
+                for (int i = 0; i < CellArguments.Length; i++) il.Emit(OpCodes.Ldarg_S, (byte)i);
+                il.Emit(OpCodes.Newobj, make);
+                il.Emit(OpCodes.Ret);
+                var makerTypes = new Type[CellArguments.Length + 1];
+                Array.Copy(CellArguments, makerTypes, CellArguments.Length);
+                makerTypes[CellArguments.Length] = cell;
+                Delegate maker = method.CreateDelegate(typeof(Func<,,,,,,,,>).MakeGenericType(makerTypes));
+                typeof(ShoreCells<>).MakeGenericType(cell).GetMethod(nameof(ShoreCells<int>.Use), BindingFlags.NonPublic | BindingFlags.Static)
+                    .Invoke(null, new object[] { maker });
+                MethodInfo provide = typeof(Compat_Waves).GetMethod(nameof(Provide), BindingFlags.NonPublic | BindingFlags.Static).MakeGenericMethod(cell);
+
+                why = null;
+                return new ShoreApi
+                {
+                    Version = v, DelegateType = provider, CellType = cell, LayoutType = layout,
+                    Provider = Delegate.CreateDelegate(provider, provide),
+                    add = add, remove = remove, shore = shore, touchedSince = touchedSince,
+                    changed = (Action<Map>)Delegate.CreateDelegate(typeof(Action<Map>), changedAt),
+                    isValid = isValid, layoutVersion = layoutVersion, layoutLocal = layoutLocal,
+                };
+            }
+
+            internal void Add() => add.Invoke(null, new object[] { Provider });
+
+            internal void Remove() => remove.Invoke(null, new object[] { Provider });
+
+            internal void Changed(Map map) => changed(map);
+
+            internal bool Read(Map map, out int v, out int local, out object layout)
+            {
+                layout = shore.Invoke(null, new object[] { map });
+                v = local = 0;
+                if (layout == null || !(bool)isValid.GetValue(layout)) return false;
+                v = (int)layoutVersion.GetValue(layout);
+                local = (int)layoutLocal.GetValue(layout);
+                return true;
+            }
+
+            internal bool TouchedSince(object layout, CellRect section, int since) => (bool)touchedSince.Invoke(layout, new object[] { section, since });
+        }
+
+        private static class ShoreCells<T> where T : struct
+        {
+            internal static Func<float, float, float, float, bool, bool, bool, float, T> Make;
+
+            internal static void Use(Delegate maker) => Make = (Func<float, float, float, float, bool, bool, bool, float, T>)maker;
+        }
+
+        internal static bool Provide<T>(Map map, int x, int z, out T cell) where T : struct
+        {
+            cell = default;
+            if (map == null) return false;
+            try
+            {
+                OutsideShore o = Answering(map);
+                if (o == null) return false;
+                int i = o.Idx(x, z);
+                byte kind = o.Kind[i];
+                cell = ShoreCells<T>.Make(o.Signed[i], kind == 2 ? 1f : kind == 1 ? 0.5f : 0f, o.Reach[i], o.Calm[i],
+                    o.Covered != null && o.Covered[i], o.Frozen[i], o.Rock[i], o.Clearance[i]);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                cell = default;
+                Log.ErrorOnce(IntegrationLog.Prefix + "Answering Waves about the sea past the map edge failed; Waves takes that cell for dry land. " + ex, 0x45485750);
+                return false;
+            }
+        }
+
+        private static OutsideShore Answering(Map map)
+        {
+            OutsideShore o = Building ?? Inner;
+            if (o != null && o.Map == map) return o;
+            WavesWatch watch = watches.GetOrCreateValue(map);
+            int frame = Time.frameCount;
+            if (!watch.Asked || watch.AskedFrame != frame || watch.AskedEpoch != epoch)
+            {
+                watch.Asked = true;
+                watch.AskedFrame = frame;
+                watch.AskedEpoch = epoch;
+                watch.Answer = Serves(map) ? shores.Current(map) : null;
+            }
+            return watch.Answer;
+        }
+
+        private static bool Serves(Map map)
+        {
+            if (shoreApi == null) return false;
+            string state = HorizonExtensions.StateOf(Owner);
+            if (state == "failed") dropPending = true;
+            return (state == "active" || state == "restored") && Drawn(map);
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static bool Drawn(Map map) => HorizonInfo.IsActive(map);
+
+        private static bool Asked(OutsideShore o) => shoreApi != null && o.Map != null;
+
+        private static void Follow(Map map, WavesWatch watch)
+        {
+            if (shoreApi == null) return;
+            try
+            {
+                OutsideShore now = Serves(map) ? shores.Current(map) : null;
+                bool serving = now != null;
+                ulong band = serving ? now.Band : 0;
+                if (serving == watch.Serving && band == watch.Band) return;
+                watch.Serving = serving;
+                watch.Band = band;
+                Announce(map, watch);
+            }
+            catch (Exception ex)
+            {
+                Log.ErrorOnce(IntegrationLog.Prefix + "Telling Waves that the sea past the map edge changed failed; its sections at the edge keep what they had. " + ex, 0x45485743);
+            }
+        }
+
+        private static void Announce(Map map, WavesWatch watch)
+        {
+            bool had = ReadShore(map, false, out int before, out _, out _);
+            shoreApi.Changed(map);
+            if (!had || !ReadShore(map, false, out int after, out _, out _) || after == before) return;
+            if (watch.OwnTop != before) watch.OwnBase = before;
+            watch.OwnTop = after;
+        }
+
+        private static bool Ours(WavesWatch watch, int from, int to) =>
+            from == to || to == watch.OwnTop && from >= watch.OwnBase && from < watch.OwnTop;
+
+        private static void DropProvider()
+        {
+            dropPending = false;
+            ShoreApi api = shoreApi;
+            if (api == null) return;
+            shoreApi = null;
+            epoch++;
+            try
+            {
+                api.Remove();
+                PatchRows();
+            }
+            catch (Exception ex)
+            {
+                Log.Error(IntegrationLog.Prefix + "Taking EH's provider out of Waves failed; it answers nothing from now on. " + ex);
+            }
+            SetMode("legacy mode (provider removed: the integration failed)");
+        }
+
+        private static bool ReadShore(Map map, bool create, out int v, out int local, out object shore)
+        {
+            ShoreApi api = shoreApi;
+            if (api != null)
+            {
+                if (create || peek == null || peek.Invoke(null, new object[] { map }) != null) return api.Read(map, out v, out local, out shore);
+                v = local = 0;
+                shore = null;
+                return false;
+            }
+            shore = (create ? fieldFor : peek ?? fieldFor).Invoke(null, new object[] { map });
+            v = local = 0;
+            if (shore == null) return false;
+            v = (int)version.GetValue(shore);
+            local = (int)localVersion.GetValue(shore);
+            return true;
+        }
+
+        private static bool CanTellSections => shoreApi != null || touchedSince != null;
+
+        private static bool TouchedSince(object shore, CellRect section, int since) => shoreApi != null
+            ? shoreApi.TouchedSince(shore, section, since)
+            : (bool)touchedSince.Invoke(shore, new object[] { section, since });
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static void AskRefresh(Map map, CellRect area) => HorizonInfo.RequestRefresh(map, Owner, area);
+
         internal readonly struct Entered
         {
             internal readonly OutsideShore Outer, Inner;
@@ -488,7 +885,7 @@ namespace EndlessHorizon
                 Inner = null;
                 if (!joined) return;
                 OutsideShore o = shores.Current(map);
-                if (o != null && (int)version.GetValue(fieldFor.Invoke(null, new object[] { map })) == o.Version) Inner = o;
+                if (o != null && ReadShore(map, true, out int now, out _, out _) && Ours(watches.GetOrCreateValue(map), o.Version, now)) Inner = o;
             }
             catch (Exception ex)
             {
@@ -530,15 +927,29 @@ namespace EndlessHorizon
             internal bool Started;
             internal int LastVersion, LastLocal, NextPoll;
             internal readonly List<CellRect> SeaSections = new List<CellRect>();
+
+            internal bool Asked;
+            internal int AskedFrame, AskedEpoch;
+            internal OutsideShore Answer;
+            internal bool Serving;
+            internal ulong Band;
+            internal int OwnBase = int.MinValue, OwnTop = int.MinValue;
         }
 
         private static readonly ConditionalWeakTable<Map, WavesWatch> watches = new ConditionalWeakTable<Map, WavesWatch>();
 
         private static void Changed(Map map, string id, CellRect area)
         {
+            epoch++;
+            if (dropPending) DropProvider();
             if (id == "disposed")
             {
                 shores.Disposed(map);
+                if (watches.TryGetValue(map, out WavesWatch gone) && gone.Serving)
+                {
+                    try { shoreApi?.Changed(map); }
+                    catch (Exception ex) { Log.ErrorOnce(IntegrationLog.Prefix + "Telling Waves that the sea past the map edge is gone failed. " + ex, 0x45485744); }
+                }
                 watches.Remove(map);
                 glowLayers.Remove(map);
             }
@@ -548,16 +959,21 @@ namespace EndlessHorizon
                 OutsideShore o = shores.Current(map);
                 WavesWatch watch = watches.GetOrCreateValue(map);
                 Learn(map, watch, o);
-                if (o != null && (int)version.GetValue(fieldFor.Invoke(null, new object[] { map })) != o.Version)
-                    HorizonInfo.RequestRefresh(map, Owner, HorizonSpace.Bounds(map));
+                if (o != null && ReadShore(map, true, out int now, out _, out _) && !Ours(watch, o.Version, now))
+                    AskRefresh(map, HorizonSpace.Bounds(map));
+                Follow(map, watch);
+            }
+            else if (id == "settings")
+            {
+                Follow(map, watches.GetOrCreateValue(map));
             }
             else if (id == "terrain.base" && IntegrationWater.Within(map, area, 8, IsSea))
             {
-                HorizonInfo.RequestRefresh(map, Owner, area);
+                AskRefresh(map, area);
             }
             else if (id == "terrain.top" && ModsConfig.OdysseyActive && IntegrationWater.Within(map, area, 8, IsSea))
             {
-                HorizonInfo.RequestRefresh(map, Owner, area);
+                AskRefresh(map, area);
             }
         }
 
@@ -597,20 +1013,25 @@ namespace EndlessHorizon
             WavesWatch watch = watches.GetOrCreateValue(map);
             if (Time.frameCount < watch.NextPoll) return;
             watch.NextPoll = Time.frameCount + PollFrames;
-            object field = (peek ?? fieldFor).Invoke(null, new object[] { map });
-            if (field == null) return;
-            int v = (int)version.GetValue(field), lv = (int)localVersion.GetValue(field);
+            if (dropPending) DropProvider();
+            Poll(map, watch);
+            Follow(map, watch);
+        }
+
+        private static void Poll(Map map, WavesWatch watch)
+        {
+            if (!ReadShore(map, false, out int v, out int lv, out object shore)) return;
             if (watch.Started)
             {
-                if (v != watch.LastVersion) HorizonInfo.RequestRefresh(map, Owner, HorizonSpace.Bounds(map));
+                if (!Ours(watch, watch.LastVersion, v)) AskRefresh(map, HorizonSpace.Bounds(map));
                 else if (lv != watch.LastLocal)
                 {
-                    if (touchedSince == null) HorizonInfo.RequestRefresh(map, Owner, HorizonSpace.Bounds(map));
+                    if (!CanTellSections) AskRefresh(map, HorizonSpace.Bounds(map));
                     else
                     {
                         foreach (CellRect section in watch.SeaSections)
                         {
-                            if ((bool)touchedSince.Invoke(field, new object[] { section, watch.LastLocal })) HorizonInfo.RequestRefresh(map, Owner, section);
+                            if (TouchedSince(shore, section, watch.LastLocal)) AskRefresh(map, section);
                         }
                     }
                 }

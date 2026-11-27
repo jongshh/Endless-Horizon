@@ -93,7 +93,7 @@ namespace EndlessHorizon
                    $"rivers={s.Field.River?.Crossings.Count ?? -1} riverCells={s.Field.RiverCells} meander=x{RiverExtension.MeanderScale:0.##} bank=x{RiverExtension.BankScale:0.##} " +
                    $"roads={s.Field.Roads?.Crossings.Count(c => c.Road != null) ?? -1} roadCells={s.Field.RoadCells} bridgeCells={s.Field.BridgeCells} roadCut={s.Field.RoadCutCells} roadBuildings={s.Field.RoadBuildingCells} " +
                    $"printedThings={s.PrintedThings} fogCells={s.FogCells} rockCells={s.Mountains?.RockCells ?? -1} fogQueue={(HorizonFog.SelfLit ? "selfLit" : "lit")} " +
-                   $"outside={s.Field.OutsideMode} riverPaint=[{s.Field.RiverPaintReport}] fogTint={s.Tint?.Report ?? "none"} " +
+                   $"outside={s.Field.OutsideMode} riverPaint=[{s.Field.RiverPaintReport}] fogTint={s.Tint?.Report ?? "none"} fogTintRefreshes={s.FogTintRefreshes} " +
                    $"rockPrint={RockPrint.Printed}/{RockPrint.Fallbacks} rockNoDef={s.Mountains?.RockCellsWithoutDef ?? -1} weatherReimagined={(Compat_WeatherReimagined.Installed ? (Compat_WeatherReimagined.SkyOf(s.map) != null ? "openSky" : "failed") : "absent")} " +
                    $"reason=[{s.BuildReason}] fogPath={HorizonFog.Path} " + PhaseTimes(s);
         }

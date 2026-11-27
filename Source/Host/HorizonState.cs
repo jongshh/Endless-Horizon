@@ -21,6 +21,9 @@ namespace EndlessHorizon
         internal HorizonSurface Surface;
         internal RockRender Rocks;
         internal FogTint Tint;
+        private bool fogTintDue;
+        private float fogTintNext;
+        internal int FogTintRefreshes;
         public CoastNoise.Source CoastSourceOverride;
         public bool RebuildRequested;
         private HorizonState replacement;
@@ -462,6 +465,39 @@ namespace EndlessHorizon
             }
         }
 
+        internal void FogRegenerated()
+        {
+            if (Built && Tint != null && Tint.Reads) fogTintDue = true;
+        }
+
+        private void FogTintStep()
+        {
+            if (!fogTintDue || Time.realtimeSinceStartup < fogTintNext) return;
+            fogTintDue = false;
+            fogTintNext = Time.realtimeSinceStartup + 1f;
+            var sw = Stopwatch.StartNew();
+            if (FogTint.ReadSignature(map, Domain) == Tint.Signature)
+            {
+                HorizonPerf.Record("fog tint check", sw.Elapsed.TotalMilliseconds);
+                return;
+            }
+            FogTint fresh = FogTint.Build(map, Domain);
+            if (fresh != null && !fresh.SameAs(Tint))
+            {
+                Tint = fresh;
+                foreach (HorizonThingsChunk c in dynThings)
+                {
+                    if (c != null) fresh.Recolour(c.subMeshes);
+                }
+                FogTintRefreshes++;
+            }
+            else if (fresh != null)
+            {
+                Tint = fresh;
+            }
+            HorizonPerf.Record("fog tint read", sw.Elapsed.TotalMilliseconds);
+        }
+
         private void RefreshStep(bool force)
         {
             var sw = System.Diagnostics.Stopwatch.StartNew();
@@ -861,6 +897,7 @@ namespace EndlessHorizon
                 if (!Replacing)
                 {
                     RefreshStep(false);
+                    FogTintStep();
                     GlowStep();
                     PublishChanges();
                 }

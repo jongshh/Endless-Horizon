@@ -112,7 +112,7 @@ namespace EndlessHorizon
             }
             if (transpiled.Count == 0) return "no effect group recognised (" + groups[0].Reason + ")";
 
-            var transpiler = new HarmonyMethod(typeof(Compat_QuietWonders), nameof(Transpiler));
+            var transpiler = new HarmonyMethod(typeof(Compat_QuietWonders), nameof(Transpiler)) { priority = Priority.Last };
             foreach (MethodInfo m in transpiled) harmony.Patch(m, transpiler: transpiler);
             var exit = new HarmonyMethod(typeof(Compat_QuietWonders), nameof(ExitFinalizer));
             foreach (MethodInfo m in entered) harmony.Patch(m, prefix: new HarmonyMethod(typeof(Compat_QuietWonders), nameof(EnterPrefix)), finalizer: exit);
@@ -125,7 +125,8 @@ namespace EndlessHorizon
             }
 
             Detail = "on: " + string.Join(", ", groups.Where(g => g.On).Select(g => g.Name))
-                + (groups.Any(g => !g.On) ? "\noff: " + string.Join("; ", groups.Where(g => !g.On).Select(g => g.Name + " (" + g.Reason + ")")) : "");
+                + (groups.Any(g => !g.On) ? "\noff: " + string.Join("; ", groups.Where(g => !g.On).Select(g => g.Name + " (" + g.Reason + ")")) : "")
+                + (standIns.Count > 0 ? "\nanswered in place of another mod's call: " + string.Join(", ", standIns.Select(e => e.Name + " as " + e.Kind)) : "");
             HorizonInfo.Report(Owner, "effects", Detail);
             Log.Message(IntegrationLog.Prefix + "Quiet Wonders " + Detail.Replace('\n', ' '));
             return null;
@@ -266,10 +267,87 @@ namespace EndlessHorizon
                 {
                     yield return new CodeInstruction(OpCodes.Call, to) { labels = i.labels, blocks = i.blocks };
                 }
+                else if (i.opcode == OpCodes.Call && i.operand is MethodInfo other && StandIn(other) is int id)
+                {
+                    yield return new CodeInstruction(OpCodes.Ldc_I4, id) { labels = i.labels, blocks = i.blocks };
+                    yield return new CodeInstruction(OpCodes.Call, AccessTools.Method(typeof(Compat_QuietWonders), nameof(W_StandIn)));
+                }
                 else
                 {
                     yield return i;
                 }
+            }
+        }
+
+        internal sealed class StandInCall
+        {
+            internal string Name;
+            internal string Kind;
+            internal Func<IntVec3, Map, bool> Inner;
+        }
+
+        internal static readonly List<StandInCall> standIns = new List<StandInCall>();
+        private static readonly Dictionary<MethodInfo, int> standInIds = new Dictionary<MethodInfo, int>();
+
+        private static readonly string[] StandInKinds = { nameof(W_InBounds), nameof(W_Fogged), nameof(W_Roofed), nameof(W_Standable) };
+
+        internal static int? StandIn(MethodInfo m)
+        {
+            if (standInIds.TryGetValue(m, out int known)) return known < 0 ? (int?)null : known;
+            int id = -1;
+            try
+            {
+                ParameterInfo[] p = m.GetParameters();
+                Assembly from = m.DeclaringType?.Assembly;
+                bool foreign = from != null && from != qwAssembly && from != typeof(Map).Assembly && from != typeof(Compat_QuietWonders).Assembly
+                               && from != typeof(object).Assembly && from != typeof(Harmony).Assembly;
+                if (foreign && m.IsStatic && m.ReturnType == typeof(bool) && p.Length == 2 && p[0].ParameterType == typeof(IntVec3)
+                    && p[1].ParameterType == typeof(Map) && m.GetMethodBody() != null)
+                {
+                    var asks = new HashSet<string>();
+                    bool asksMap = false;
+                    foreach (CodeInstruction ins in PatchProcessor.GetOriginalInstructions(m))
+                    {
+                        if (!(ins.operand is MethodBase callee) || (ins.opcode != OpCodes.Call && ins.opcode != OpCodes.Callvirt)) continue;
+                        if (swaps.TryGetValue(callee, out MethodInfo to))
+                        {
+                            asksMap = true;
+                            if (Array.IndexOf(StandInKinds, to.Name) >= 0) asks.Add(to.Name);
+                        }
+                        else if (Sensitive(callee)) asksMap = true;
+                    }
+                    if (asksMap)
+                    {
+                        id = standIns.Count;
+                        standIns.Add(new StandInCall
+                        {
+                            Name = m.DeclaringType.FullName + "." + m.Name,
+                            Kind = asks.Count == 1 ? asks.First().Substring(2) : "",
+                            Inner = (Func<IntVec3, Map, bool>)Delegate.CreateDelegate(typeof(Func<IntVec3, Map, bool>), m),
+                        });
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Error(IntegrationLog.Prefix + "Quiet Wonders: reading " + m.DeclaringType?.Name + "." + m.Name + ", which another mod put into Quiet Wonders, failed; it stays as it is. " + ex);
+                id = -1;
+            }
+            standInIds[m] = id;
+            return id < 0 ? (int?)null : id;
+        }
+
+        public static bool W_StandIn(IntVec3 c, Map map, int id)
+        {
+            StandInCall call = standIns[id];
+            if (!Off(c, map, out Ctx k)) return call.Inner(c, map);
+            switch (call.Kind)
+            {
+                case "InBounds": return InZone(k, c);
+                case "Fogged": return FoggedOut(k, c);
+                case "Roofed": return RoofedOut(k, c);
+                case "Standable": return StandableOut(k, c);
+                default: return false;
             }
         }
 

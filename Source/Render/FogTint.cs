@@ -59,14 +59,16 @@ namespace EndlessHorizon
                 SectionLayer layer = section.GetLayer(typeof(SectionLayer_FogOfWar));
                 if (layer != null)
                 {
-
+                    CellRect r = section.CellRect;
+                    bool band = domain.AnyInBand(r.minX, r.minZ, r.maxX, r.maxZ, Band + 1);
+                    int stride = band ? 1 : 8;
                     foreach (LayerSubMesh sm in layer.subMeshes)
                     {
                         if (sm.material != MatBases.FogOfWar || sm.disabled) continue;
                         List<Vector3> verts = sm.verts;
                         List<Color32> colors = sm.colors;
                         int n = Mathf.Min(verts.Count, colors.Count);
-                        for (int i = 0; i < n; i++)
+                        for (int i = 0; i < n; i += stride)
                         {
                             Color32 c = colors[i];
                             if (c.r == 0 && c.g == 0 && c.b == 0) continue;
@@ -75,6 +77,7 @@ namespace EndlessHorizon
                                 all += new Vector3(c.r, c.g, c.b);
                                 allCount++;
                             }
+                            if (!band) continue;
                             int x = Mathf.Clamp(Mathf.FloorToInt(verts[i].x), 0, w - 1);
                             int z = Mathf.Clamp(Mathf.FloorToInt(verts[i].z), 0, h - 1);
                             if (!domain.InBand(x, z, Band)) continue;
@@ -117,11 +120,44 @@ namespace EndlessHorizon
             }
         }
 
+        public long Signature { get; private set; }
+
+        public static long ReadSignature(Map map, HorizonDomain domain)
+        {
+            Section[,] sections = sectionsRef(map.mapDrawer);
+            if (sections == null) return 0;
+            unchecked
+            {
+                long hash = 17;
+                foreach (Section section in sections)
+                {
+                    if (section == null) continue;
+                    SectionLayer layer = section.GetLayer(typeof(SectionLayer_FogOfWar));
+                    if (layer == null) continue;
+                    CellRect r = section.CellRect;
+                    int stride = domain.AnyInBand(r.minX, r.minZ, r.maxX, r.maxZ, Band + 1) ? 1 : 8;
+                    foreach (LayerSubMesh sm in layer.subMeshes)
+                    {
+                        if (sm.material != MatBases.FogOfWar || sm.disabled) continue;
+                        List<Color32> colors = sm.colors;
+                        for (int i = 0; i < colors.Count; i += stride)
+                        {
+                            Color32 c = colors[i];
+                            hash = hash * 31 + (c.r | c.g << 8 | c.b << 16);
+                        }
+                    }
+                }
+                return hash;
+            }
+        }
+
         public static FogTint Build(Map map, HorizonDomain domain)
         {
             try
             {
-                return new FogTint(map, domain);
+                var tint = new FogTint(map, domain);
+                if (tint.Reads) tint.Signature = ReadSignature(map, domain);
+                return tint;
             }
             catch (System.Exception ex)
             {
@@ -131,6 +167,44 @@ namespace EndlessHorizon
         }
 
         public string Report => Tinted ? $"tinted (mean {mean.r},{mean.g},{mean.b}; {reason})" : reason;
+
+        public bool Reads => reason != "vanilla";
+
+        public bool SameAs(FogTint other)
+        {
+            if (other == null || other.w != w || other.h != h || other.Tinted != Tinted) return false;
+            if (!Tinted) return true;
+            if (!SameColour(mean, other.mean)) return false;
+            for (int k = 0; k < cellColor.Length; k++)
+            {
+                Color32? a = cellColor[k], b = other.cellColor[k];
+                if (a.HasValue != b.HasValue || a.HasValue && !SameColour(a.Value, b.Value)) return false;
+            }
+            return true;
+        }
+
+        private static bool SameColour(Color32 a, Color32 b) => a.r == b.r && a.g == b.g && a.b == b.b;
+
+        public int Recolour(List<LayerSubMesh> subMeshes)
+        {
+            int changed = 0;
+            foreach (LayerSubMesh sm in subMeshes)
+            {
+                if (sm.material != MatBases.FogOfWar || sm.mesh == null) continue;
+                List<Vector3> verts = sm.verts;
+                List<Color32> colors = sm.colors;
+                if (verts.Count == 0 || colors.Count != verts.Count) continue;
+                for (int i = 0; i < verts.Count; i++)
+                {
+                    Color32 c = At(Mathf.RoundToInt(verts[i].x), Mathf.RoundToInt(verts[i].z));
+                    c.a = colors[i].a;
+                    colors[i] = c;
+                }
+                sm.mesh.SetColors(colors);
+                changed++;
+            }
+            return changed;
+        }
 
         public Color32 At(int x, int z)
         {

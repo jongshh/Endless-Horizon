@@ -44,11 +44,11 @@ namespace EndlessHorizon
 
         internal static void Init(Harmony harmony)
         {
-            Add("RimWorld: Waves", "waves", "patrickschwarzer.waves", null, () => Compat_Waves.Enable(harmony));
+            Add("RimWorld: Waves", "waves", "patrickschwarzer.waves", null, () => Compat_Waves.Enable(harmony), () => Compat_Waves.Detail);
             Add("RimWorld: Living Waters", "livingwaters", "patrickschwarzer.rivers", null, () => Compat_LivingWaters.Enable(harmony));
             Add("Quiet Wonders", "quietwonders", "choco.quietwonders", null, () => Compat_QuietWonders.Enable(harmony), () => Compat_QuietWonders.Detail);
             Add("Weather Reimagined", "weatherreimagined", null, "LivingWeather.Freiflaeche", Compat_WeatherReimagined.Enable);
-            Add("Realistic Rain", "realisticrain", null, "RealisticRain.ReflectionCapture", Compat_RealisticRain.Enable);
+            Add("Realistic Rain", "realisticrain", null, "RealisticRain.ReflectionCapture", () => Compat_RealisticRain.Enable(harmony), () => Compat_RealisticRainOutside.Detail);
         }
 
         private static void Add(string name, string owner, string packageId, string typeName, Func<string> enable, Func<string> detail = null)

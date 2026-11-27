@@ -8,7 +8,7 @@ namespace EndlessHorizon
 {
     internal class EndlessHorizonMod : Mod
     {
-        public const string Version = "1.0.0.5";
+        public const string Version = "1.0.0.6";
         public const string LogPrefix = HorizonLog.Prefix;
 
         public static HorizonSettings Settings
